@@ -199,7 +199,8 @@ app.use(cors({
 
     const allowLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
     const allowPrivateLan = /^http:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/i.test(origin);
-    if (allowLocalhost || allowPrivateLan) return callback(null, true);
+    const allowCloudflarePages = /^https:\/\/[a-z0-9-]+\.ticket-system-frontend-f77\.pages\.dev$/i.test(origin);
+    if (allowLocalhost || allowPrivateLan || allowCloudflarePages) return callback(null, true);
 
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
