@@ -2,6 +2,12 @@
 node_modules/
 **/node_modules/
 
+# Python virtual environments
+venv/
+**/venv/
+__pycache__/
+*.pyc
+
 # Build outputs
 frontend/dist/
 backend/dist/
