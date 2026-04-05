@@ -1,0 +1,109 @@
+services:
+  - type: web
+    name: scj-command-centre-api
+    runtime: node
+    rootDir: node-backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: ACCESS_TOKEN_TTL
+        value: 15m
+      - key: TRUST_PROXY
+        value: true
+      - key: API_AUTH_RATE_LIMIT_WINDOW_MS
+        value: 60000
+      - key: API_AUTH_RATE_LIMIT_MAX
+        value: 1200
+      - key: API_PROTECTED_RATE_LIMIT_WINDOW_MS
+        value: 60000
+      - key: API_PROTECTED_RATE_LIMIT_MAX
+        value: 250000
+      - key: SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MONTHLY_REPORT_CHAT_ID
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURE
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: NOTIFY_FROM_EMAIL
+        sync: false
+      - key: MANAGER_EMAIL
+        sync: false
+      - key: MANAGER_TELEGRAM_NUMBER
+        sync: false
+      - key: CONNECTOR_SHARED_SECRET
+        sync: false
+      - key: WAZUH_API_URL
+        sync: false
+      - key: WAZUH_API_USERNAME
+        sync: false
+      - key: WAZUH_API_PASSWORD
+        sync: false
+      - key: WAZUH_ALERTS_PATH
+        sync: false
+      - key: WAZUH_VERIFY_TLS
+        sync: false
+      - key: CONNECTOR_ALLOWED_IPS
+        sync: false
+      - key: CONNECTOR_MAX_SKEW_SECONDS
+        sync: false
+      - key: CONNECTOR_REPLAY_TTL_SECONDS
+        sync: false
+      - key: CONNECTOR_ENFORCE_SIGNATURE
+        sync: false
+      - key: CONNECTOR_REQUIRE_CONTENT_TYPE_JSON
+        sync: false
+      - key: CONNECTOR_MAX_PAYLOAD_BYTES
+        sync: false
+      - key: CONNECTOR_WAZUH_RATE_LIMIT_MAX
+        sync: false
+      - key: CONNECTOR_SURICATA_RATE_LIMIT_MAX
+        sync: false
+      - key: CONNECTOR_PROMETHEUS_RATE_LIMIT_MAX
+        sync: false
+      - key: AUTOMATION_NETWORK_ENABLED
+        sync: false
+      - key: AUTOMATION_DATABASE_ENABLED
+        sync: false
+      - key: AUTOMATION_AUTO_CREATE_TICKETS
+        sync: false
+      - key: AUTOMATION_DEVICE_PASSIVE_CRON
+        sync: false
+      - key: AUTOMATION_DEVICE_IDS_CRON
+        sync: false
+      - key: AUTOMATION_DATABASE_REVIEW_CRON
+        sync: false
+      - key: AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD
+        sync: false
+      - key: AUTOMATION_DATABASE_RISK_ALERT_THRESHOLD
+        sync: false
+      - key: AUTOMATION_DEVICE_PASSIVE_INTERVAL_MINUTES
+        sync: false
+      - key: AUTOMATION_DEVICE_IDS_INTERVAL_MINUTES
+        sync: false
+      - key: AUTOMATION_DATABASE_REVIEW_INTERVAL_MINUTES
+        sync: false

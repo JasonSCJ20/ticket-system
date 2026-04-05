@@ -1,0 +1,9 @@
+
+body {
+  margin: 0;
+  background: radial-gradient(circle at 10% 15%, #dceeff 0, transparent 35%),
+    radial-gradient(circle at 85% 10%, #e8f4ea 0, transparent 32%),
+    linear-gradient(155deg, var(--bg-1), var(--bg-2));
+  color: var(--ink);
+}
+

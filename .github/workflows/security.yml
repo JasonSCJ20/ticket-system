@@ -1,0 +1,76 @@
+name: Security Checks
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install Python dependencies
+      run: |
+        cd backend
+        pip install -r requirements.txt
+
+    - name: Run Bandit (Python security scan)
+      run: |
+        pip install bandit
+        bandit -r backend/app -f json -o bandit-report.json || true
+        cat bandit-report.json
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+
+    - name: Install Node dependencies
+      run: |
+        cd node-backend
+        npm install
+
+    - name: Run npm audit
+      run: |
+        cd node-backend
+        npm audit --audit-level=moderate --json > npm-audit-report.json || true
+        cat npm-audit-report.json
+
+    - name: Run Snyk (if token available)
+      if: env.SNYK_TOKEN != ''
+      run: |
+        npm install -g snyk
+        cd node-backend
+        snyk test --json > snyk-report.json || true
+        cat snyk-report.json
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+    - name: Upload reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+          node-backend/npm-audit-report.json
+          node-backend/snyk-report.json
+
+    - name: Fail on high severity
+      run: |
+        if grep -q '"severity": "HIGH"' bandit-report.json; then
+          echo "High severity issues found in Bandit scan"
+          exit 1
+        fi
+        if grep -q '"severity": "high"' node-backend/npm-audit-report.json; then
+          echo "High severity vulnerabilities in npm audit"
+          exit 1
+        fi

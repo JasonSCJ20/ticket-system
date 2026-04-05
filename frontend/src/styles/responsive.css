@@ -1,0 +1,177 @@
+@media (max-width: 1100px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    height: auto;
+    position: static;
+    border-right: 0;
+    border-bottom: 1px solid rgba(210, 223, 240, 0.35);
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-columns-3 {
+    grid-template-columns: 1fr;
+  }
+
+  .executive-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .situation-float {
+    position: static;
+    width: 100%;
+    margin-bottom: 0.8rem;
+  }
+
+  .workspace-with-sidecar {
+    padding-right: 1.2rem;
+  }
+
+  .ai-sidecar {
+    top: auto;
+    bottom: 4rem;
+    max-height: 58vh;
+  }
+
+  .patch-board-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .staff-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .health-severity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .health-app-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .application-analytics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .application-analytics-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .threat-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .network-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .network-sensor-grid,
+  .network-traffic-grid,
+  .network-app-grid,
+  .network-app-metrics,
+  .connected-device-grid,
+  .connected-device-metrics,
+  .patch-board-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .patch-card,
+  .patch-card-flip {
+    max-height: none;
+    min-height: 0;
+  }
+
+  .patch-card-controls select,
+  .patch-card-action-row .ghost-btn {
+    width: 100%;
+  }
+
+  .patch-card-action-row {
+    justify-content: stretch;
+  }
+
+  .threat-app-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .threat-metrics-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fortress-state-row,
+  .fortress-grid,
+  .fortress-telemetry {
+    grid-template-columns: 1fr;
+  }
+
+  .fortress-actions,
+  .fortress-patch-actions {
+    flex-direction: column;
+  }
+
+  .fortress-card-tooling {
+    grid-column: span 1;
+  }
+
+  .fortress-patch-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ticket-form button {
+    width: 100%;
+  }
+
+  .presentation-controls {
+    width: 100%;
+  }
+
+  .presentation-controls .ghost-btn {
+    flex: 1;
+  }
+
+  .situation-float-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ai-sidecar {
+    width: calc(100vw - 1.4rem);
+    right: 0.7rem;
+  }
+
+  .ai-sidecar-kpis {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media print {
+  .sidebar,
+  .error-banner,
+  .insight-panel,
+  .situation-float,
+  .nav-btn,
+  .logout-btn {
+    display: none !important;
+  }
+
+  .workspace {
+    padding: 0;
+  }
+
+  .board-snapshot-panel {
+    display: block !important;
+    border: 0;
+    box-shadow: none;
+  }
+}

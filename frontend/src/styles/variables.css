@@ -1,0 +1,15 @@
+:root {
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  --bg-1: #eef5ff;
+  --bg-2: #f8fbff;
+  --panel: rgba(252, 254, 255, 0.94);
+  --ink: #102238;
+  --muted: #4f6680;
+  --line: #d5dfec;
+  --accent: #1f7a8c;
+  --danger: #b42318;
+}
+
+* {
+  box-sizing: border-box;
+}

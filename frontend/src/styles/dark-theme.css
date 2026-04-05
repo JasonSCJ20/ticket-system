@@ -1,0 +1,223 @@
+body.dark-theme {
+  --bg-1: #1a2332;
+  --bg-2: #232d3d;
+  --panel: rgba(28, 36, 48, 0.94);
+  --ink: #e8eef7;
+  --muted: #9aacbe;
+  --line: #3a4655;
+  --accent: #1f7a8c;
+  --danger: #f05848;
+  background: radial-gradient(circle at 10% 15%, #2a3a52 0, transparent 35%),
+    radial-gradient(circle at 85% 10%, #1f3a2a 0, transparent 32%),
+    linear-gradient(155deg, #1c2a3c, #233440);
+}
+
+body.dark-theme .sidebar {
+  border-right-color: #3a4655;
+  background: rgba(28, 36, 48, 0.96);
+  color: #d0dce8;
+}
+
+body.dark-theme .nav-btn {
+  color: #a8bcd1;
+}
+
+body.dark-theme .nav-btn:hover {
+  background: rgba(94, 146, 199, 0.22);
+}
+
+body.dark-theme .profile-card {
+  border-color: #3a4655;
+  background: #3d4a5f;
+}
+
+body.dark-theme .profile-card strong {
+  color: #e8eef7;
+}
+
+body.dark-theme .profile-card span {
+  color: #a8bcd1;
+}
+
+body.dark-theme .top-nav-bar {
+  background: linear-gradient(120deg, rgba(28, 36, 48, 0.98), rgba(32, 42, 56, 0.98));
+  border-color: #3a4655;
+}
+
+body.dark-theme .top-nav-icon {
+  background: #3a4a62;
+  color: #d0dce8;
+}
+
+body.dark-theme .top-nav-icon:hover {
+  background: linear-gradient(120deg, #4a5a70, #4a5a70);
+}
+
+body.dark-theme .top-nav-link {
+  background: #3a4a62;
+  color: #d0dce8;
+}
+
+body.dark-theme .top-nav-link:hover {
+  background: linear-gradient(120deg, #4a5a70, #4a5a70);
+}
+
+body.dark-theme .top-nav-link.active {
+  background: linear-gradient(120deg, #2a7a96, #1f6580);
+  color: #fff;
+}
+
+body.dark-theme .logout-top-btn {
+  background: linear-gradient(120deg, #dc4a3d, #b83b31);
+  color: #fff;
+}
+
+body.dark-theme .activity-banner {
+  border-color: #355067;
+  background: linear-gradient(120deg, #263a4d, #2a3f54);
+  color: #d7e6f5;
+}
+
+body.dark-theme .activity-spinner {
+  border-color: #4f6a82;
+  border-top-color: #9ad8e6;
+}
+
+body.dark-theme .patch-card-back {
+  border-color: #4a5a6b;
+  background: linear-gradient(165deg, #334554, #2d3f4f);
+}
+
+body.dark-theme .patch-card-back h4,
+body.dark-theme .patch-history-list li {
+  color: #d7e6f5;
+}
+
+body.dark-theme .user-name {
+  color: #e8eef7;
+}
+
+body.dark-theme .user-title {
+  color: #8f9fb2;
+}
+
+body.dark-theme .current-datetime {
+  color: #a8bcd1;
+  background: #3a4a5f;
+  border-color: #4a5565;
+}
+
+body.dark-theme .settings-panel,
+body.dark-theme .audit-panel {
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+body.dark-theme .settings-header,
+body.dark-theme .audit-header {
+  border-bottom-color: #3a4655;
+}
+
+body.dark-theme .settings-section {
+  border-bottom-color: #3a4655;
+}
+
+body.dark-theme .settings-section h3 {
+  color: #e8eef7;
+}
+
+body.dark-theme .info-box {
+  background: #364654;
+  border-color: #3a4655;
+}
+
+body.dark-theme .info-box p {
+  color: #a8bcd1;
+}
+
+body.dark-theme .info-box strong {
+  color: #e8eef7;
+}
+
+body.dark-theme .password-form input {
+  background: #3a4a62;
+  border-color: #4a5565;
+  color: #e8eef7;
+}
+
+body.dark-theme .password-form input::placeholder {
+  color: #6a7a8f;
+}
+
+body.dark-theme .audit-search {
+  background: #3a4a62;
+  border-color: #4a5565;
+  color: #e8eef7;
+}
+
+body.dark-theme .audit-search::placeholder {
+  color: #6a7a8f;
+}
+
+body.dark-theme .audit-filter {
+  background: #3a4a62;
+  border-color: #4a5565;
+  color: #e8eef7;
+}
+
+body.dark-theme .audit-logs-container {
+  background: #364654;
+  border-color: #3a4655;
+}
+
+body.dark-theme .audit-table th {
+  background: #3a4a5f;
+  border-bottom-color: #4a5565;
+  color: #d0dce8;
+}
+
+body.dark-theme .audit-table td {
+  border-bottom-color: #3a4655;
+  color: #a8bcd1;
+}
+
+body.dark-theme .audit-table tbody tr:hover {
+  background: #3a4a5f;
+}
+
+body.dark-theme .audit-log-row.severity-critical {
+  background: #5a3a38;
+}
+
+body.dark-theme .audit-log-row.severity-high {
+  background: #5a4a38;
+}
+
+body.dark-theme .button-row .ghost-btn.secondary {
+  background: #3a4a62;
+  color: #9aacbe;
+}
+
+body.dark-theme .situation-drag-handle {
+  background: #3a4a62;
+  color: #d2e2f2;
+}
+
+body.dark-theme .situation-snap-toggle {
+  background: #3a4a62;
+  color: #d2e2f2;
+}
+
+body.dark-theme .situation-snap-toggle.on {
+  background: #486080;
+  color: #edf5ff;
+}
+
+body.dark-theme .situation-corner-presets button {
+  background: #3a4a62;
+  color: #d2e2f2;
+}
+
+body.dark-theme .situation-corner-presets button:hover {
+  background: #486080;
+}
