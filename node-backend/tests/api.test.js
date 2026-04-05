@@ -1,5 +1,5 @@
 import request from 'supertest';
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 

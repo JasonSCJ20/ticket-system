@@ -7,7 +7,7 @@
  * resolution reports, and audit log entries.
  */
 
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import { initModels } from '../src/models/index.js';
 
 const STAFF = [

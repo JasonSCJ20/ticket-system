@@ -14,8 +14,8 @@ import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
 // Import validation middleware
 import { body, validationResult } from 'express-validator';
-// Import bcrypt for password hashing
-import bcrypt from 'bcrypt';
+// Import bcryptjs for password hashing (avoids native bindings on PaaS)
+import bcrypt from 'bcryptjs';
 // Import configuration
 import { CONFIG } from './config.js';
 // Import database models initialization
