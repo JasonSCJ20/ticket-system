@@ -1,7 +1,11 @@
-// API base URL — use env override or relative path which Vite proxies to the backend.
-// Using a relative path means fetch() targets the same host the browser opened,
-// so it works whether accessed via localhost, LAN IP, or hostname.
-const API_URL = import.meta.env.VITE_API_URL || '/api'
+// API base URL resolution:
+// 1) Use explicit env override when provided.
+// 2) In local/dev-style hosts, use relative /api (works with Vite proxy or same-origin reverse proxy).
+// 3) In any non-local deployment, default to the remote Render API origin.
+const FRONTEND_HOST = typeof window !== 'undefined' ? window.location.hostname : ''
+const IS_LOCAL_HOST = /^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$/i.test(FRONTEND_HOST)
+const DEFAULT_REMOTE_API_URL = 'https://scj-command-centre-api.onrender.com/api'
+const API_URL = import.meta.env.VITE_API_URL || (IS_LOCAL_HOST ? '/api' : DEFAULT_REMOTE_API_URL)
 
 /**
  * Parses a failed fetch response and throws a normalized Error.
@@ -51,14 +55,24 @@ function getAuthHeaders() {
  * @param {string} password
  * @returns {Promise<Object>}
  */
-export async function login(username, password) {
+export async function login(username, password, mfaCode = '') {
   const normalizedUsername = String(username || '').trim();
   // Make POST request to token endpoint using API_URL
-  const r = await fetch(`${API_URL}/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: normalizedUsername, password }),
-  });
+  let r;
+  try {
+    r = await fetch(`${API_URL}/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: normalizedUsername, password, ...(mfaCode ? { mfaCode } : {}) }),
+    });
+  } catch (_err) {
+    throw new Error(`Unable to reach authentication API at ${API_URL}. Verify backend URL/CORS and deployment health.`)
+  }
+  if (r.status === 401) {
+    const err = await r.json().catch(() => ({}));
+    if (err?.mfaRequired) return { mfaRequired: true };
+    throw new Error(err.error || 'Login failed');
+  }
   // Throw error if request fails
   if (!r.ok) await parseErrorResponse(r, 'Login failed');
   // Parse response JSON
@@ -67,6 +81,45 @@ export async function login(username, password) {
   localStorage.setItem('access_token', data.access_token);
   // Return response data
   return data;
+}
+
+export async function logoutSession() {
+  const r = await fetch(`${API_URL}/auth/logout`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+  });
+  if (r.status === 401) return { ok: true };
+  if (!r.ok) await parseErrorResponse(r, 'Failed to log out');
+  return r.json();
+}
+
+export async function fetchMfaSetup() {
+  const r = await fetch(`${API_URL}/auth/mfa/setup`, { headers: getAuthHeaders() });
+  if (r.status === 401) return null;
+  if (!r.ok) await parseErrorResponse(r, 'Failed to initialize MFA setup');
+  return r.json();
+}
+
+export async function enableMfa(code) {
+  const r = await fetch(`${API_URL}/auth/mfa/enable`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify({ code }),
+  });
+  if (r.status === 401) return null;
+  if (!r.ok) await parseErrorResponse(r, 'Failed to enable MFA');
+  return r.json();
+}
+
+export async function disableMfa(code) {
+  const r = await fetch(`${API_URL}/auth/mfa/disable`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify({ code }),
+  });
+  if (r.status === 401) return null;
+  if (!r.ok) await parseErrorResponse(r, 'Failed to disable MFA');
+  return r.json();
 }
 
 /**

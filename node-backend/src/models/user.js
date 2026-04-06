@@ -14,6 +14,8 @@ export default (sequelize) => {
     telegramId: { type: DataTypes.INTEGER, unique: true, allowNull: true },
     role: { type: DataTypes.STRING, defaultValue: 'analyst' },
     password_hash: { type: DataTypes.STRING, allowNull: true },
+    mfaEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    mfaSecret: { type: DataTypes.STRING(128), allowNull: true },
     resetPasswordCode: { type: DataTypes.STRING(16), allowNull: true },
     resetPasswordCodeExpiresAt: { type: DataTypes.DATE, allowNull: true },
     notifyTelegram: { type: DataTypes.BOOLEAN, defaultValue: true },

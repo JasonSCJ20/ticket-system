@@ -31,9 +31,13 @@ export default function authRouteFactory({
   Op,
   bcrypt,
   randomInt,
+  randomUUID,
   jwt,
+  speakeasy,
+  authMiddleware,
   config,
   userModel,
+  revokeTokenJti,
   consumeAuthAttempt,
   clearAuthAttemptState,
   writePublicAudit,
@@ -290,13 +294,14 @@ export default function authRouteFactory({
     '/token',
     body('username').isString(),
     body('password').isString(),
+    body('mfaCode').optional().isString().trim().isLength({ min: 6, max: 8 }),
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
         return res.status(422).json({ errors: errors.array() });
       }
 
-      const { username, password } = req.body;
+      const { username, password, mfaCode } = req.body;
       const normalizedUsername = username.trim();
       const normalizedEmail = normalizedUsername.toLowerCase();
 
@@ -324,14 +329,116 @@ export default function authRouteFactory({
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
+      if (user.mfaEnabled) {
+        const code = String(mfaCode || '').trim();
+        if (!code) {
+          return res.status(401).json({ error: 'MFA required', mfaRequired: true });
+        }
+
+        const ok = speakeasy.totp.verify({
+          secret: user.mfaSecret,
+          encoding: 'base32',
+          token: code,
+          window: 1,
+        });
+
+        if (!ok) {
+          return res.status(401).json({ error: 'Invalid MFA code', mfaRequired: true });
+        }
+      }
+
+      const jti = randomUUID();
+
       const token = jwt.sign(
-        { sub: user.id, username: user.username || user.name, role: user.role },
+        { sub: user.id, username: user.username || user.name, role: user.role, jti },
         config.SECRET_KEY,
         { expiresIn: config.ACCESS_TOKEN_TTL || '15m' },
       );
-      return res.json({ access_token: token, token_type: 'bearer' });
+      return res.json({ access_token: token, token_type: 'bearer', mfaEnabled: Boolean(user.mfaEnabled) });
     },
   );
+
+  router.post('/auth/logout', authMiddleware, async (req, res) => {
+    const exp = req.user?.exp ? new Date(req.user.exp * 1000) : null;
+    await revokeTokenJti(req.user?.jti, exp);
+    return res.json({ ok: true });
+  });
+
+  router.get('/auth/mfa/setup', authMiddleware, async (req, res) => {
+    const user = await userModel.findByPk(req.user.sub);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const issuer = config.MFA_ISSUER || 'Cybersecurity Command Centre';
+    const secret = speakeasy.generateSecret({
+      name: `${issuer}:${user.username || user.name}`,
+      issuer,
+    });
+
+    await user.update({ mfaSecret: secret.base32, mfaEnabled: false });
+    return res.json({ ok: true, secret: secret.base32, otpauthUrl: secret.otpauth_url, issuer });
+  });
+
+  router.post(
+    '/auth/mfa/enable',
+    authMiddleware,
+    body('code').isString().trim().isLength({ min: 6, max: 8 }),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const user = await userModel.findByPk(req.user.sub);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      if (!user.mfaSecret) return res.status(400).json({ error: 'MFA setup not initialized' });
+
+      const ok = speakeasy.totp.verify({
+        secret: user.mfaSecret,
+        encoding: 'base32',
+        token: String(req.body.code).trim(),
+        window: 1,
+      });
+
+      if (!ok) return res.status(400).json({ error: 'Invalid MFA code' });
+
+      await user.update({ mfaEnabled: true });
+      return res.json({ ok: true, mfaEnabled: true });
+    },
+  );
+
+  router.post(
+    '/auth/mfa/disable',
+    authMiddleware,
+    body('code').isString().trim().isLength({ min: 6, max: 8 }),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const user = await userModel.findByPk(req.user.sub);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+      if (!user.mfaSecret || !user.mfaEnabled) return res.status(400).json({ error: 'MFA is not enabled' });
+
+      const ok = speakeasy.totp.verify({
+        secret: user.mfaSecret,
+        encoding: 'base32',
+        token: String(req.body.code).trim(),
+        window: 1,
+      });
+
+      if (!ok) return res.status(400).json({ error: 'Invalid MFA code' });
+
+      await user.update({ mfaEnabled: false, mfaSecret: null });
+      return res.json({ ok: true, mfaEnabled: false });
+    },
+  );
+
+  router.get('/auth/sso/config', authMiddleware, (_req, res) => {
+    res.json({
+      enabled: config.SSO_ENABLED,
+      provider: config.SSO_PROVIDER,
+      issuer: config.SSO_ISSUER,
+      clientIdConfigured: Boolean(config.SSO_CLIENT_ID),
+      callbackUrl: config.SSO_CALLBACK_URL,
+    });
+  });
 
   return router;
 }

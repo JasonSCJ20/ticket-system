@@ -40,7 +40,8 @@ import { buildAssignmentGuidance, buildAssignmentMessage, buildResolutionReport 
 // Import security functions
 import { sanitizeString, validatePriority } from './security.js';
 import { Op } from 'sequelize';
-import { randomInt } from 'crypto';
+import { randomInt, randomUUID } from 'crypto';
+import speakeasy from 'speakeasy';
 import {
   initAuthRateLimit,
   consumeAuthAttempt,
@@ -52,6 +53,8 @@ import {
 const app = express();
 const API_PERF_SAMPLE_SIZE = 200;
 const apiPerformanceMetrics = new Map();
+let isTokenRevoked = async () => false;
+let revokeTokenJti = async () => {};
 const explicitCorsOrigins = CONFIG.CORS_ALLOWED_ORIGINS
   .split(',')
   .map((value) => value.trim())
@@ -136,7 +139,18 @@ function resolveTrustProxy(value) {
 app.set('trust proxy', resolveTrustProxy(CONFIG.TRUST_PROXY));
 
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'"],
+      frameAncestors: ["'none'"],
+      objectSrc: ["'none'"],
+    },
+  },
   crossOriginEmbedderPolicy: false,
   hsts: {
     maxAge: 60 * 60 * 24 * 365,
@@ -197,14 +211,26 @@ app.use(cors({
 
     if (explicitCorsOrigins.includes(origin)) return callback(null, true);
 
+    let parsedOrigin = null;
+    try {
+      parsedOrigin = new URL(origin);
+    } catch {
+      parsedOrigin = null;
+    }
+
     const allowLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
     const allowPrivateLan = /^http:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/i.test(origin);
     const allowCloudflarePages = /^https:\/\/[a-z0-9-]+\.ticket-system-frontend-f77\.pages\.dev$/i.test(origin);
-    if (allowLocalhost || allowPrivateLan || allowCloudflarePages) return callback(null, true);
+    const allowAnyPagesDev = /^https:\/\/[a-z0-9-]+\.pages\.dev$/i.test(origin);
+    const allowRenderFrontend = /^https:\/\/[a-z0-9-]+\.onrender\.com$/i.test(origin);
+    const allowVercelFrontend = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
+    const allowNetlifyFrontend = /^https:\/\/[a-z0-9-]+\.netlify\.app$/i.test(origin);
+    const allowCustomHttpsOrigin = parsedOrigin?.protocol === 'https:' && Boolean(parsedOrigin.hostname);
+    if (allowLocalhost || allowPrivateLan || allowCloudflarePages || allowAnyPagesDev || allowRenderFrontend || allowVercelFrontend || allowNetlifyFrontend || allowCustomHttpsOrigin) return callback(null, true);
 
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
-  methods: ['GET', 'POST', 'PATCH'],
+  methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 // Parse JSON bodies with size limit
@@ -220,7 +246,7 @@ app.get('/api/healthz', (_req, res) => {
 });
 
 // Middleware function for JWT authentication
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   // Get authorization header
   const authHeader = req.headers.authorization;
   // Check if header exists
@@ -233,8 +259,12 @@ function authMiddleware(req, res, next) {
   try {
     // Verify and decode JWT token
     const payload = jwt.verify(token, CONFIG.SECRET_KEY);
+    if (payload?.jti && await isTokenRevoked(payload.jti)) {
+      return res.status(401).json({ error: 'Token has been revoked' });
+    }
     // Attach user info to request
     req.user = payload;
+    req.token = token;
     // Continue to next middleware
     next();
   } catch (err) {
@@ -278,7 +308,35 @@ async function setup() {
     networkDeviceModel,
     databaseAssetModel,
     patchTaskModel,
+    revokedTokenModel,
   } = await initModels();
+
+  isTokenRevoked = async (jti) => {
+    if (!jti) return false;
+    const existing = await revokedTokenModel.findOne({ where: { jti } });
+    if (!existing) return false;
+    if (existing.expiresAt && new Date(existing.expiresAt).getTime() <= Date.now()) {
+      await existing.destroy().catch(() => {});
+      return false;
+    }
+    return true;
+  };
+
+  revokeTokenJti = async (jti, expiresAt) => {
+    if (!jti) return;
+    await revokedTokenModel.findOrCreate({
+      where: { jti },
+      defaults: { jti, expiresAt: expiresAt || null },
+    });
+  };
+
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await revokedTokenModel.destroy({ where: { expiresAt: { [Op.lte]: new Date() } } });
+    } catch (_err) {
+      // best effort cleanup
+    }
+  });
 
   // Initialise persistent auth rate limit table and purge stale entries.
   await initAuthRateLimit();
@@ -873,9 +931,13 @@ async function setup() {
     Op,
     bcrypt,
     randomInt,
+    randomUUID,
     jwt,
+    speakeasy,
+    authMiddleware,
     config: CONFIG,
     userModel,
+    revokeTokenJti,
     consumeAuthAttempt,
     clearAuthAttemptState,
     writePublicAudit,
@@ -901,6 +963,7 @@ async function setup() {
       scjId: user.scjId || null,
       telegramId: user.telegramId,
       telegramNumber: user.telegramNumber || null,
+      mfaEnabled: Boolean(user.mfaEnabled),
     });
   });
 

@@ -13,10 +13,14 @@ import {
   createTicketActionItem,
   updateTicketActionItem,
   login,
+  logoutSession,
   createAccount,
   forgotUsername,
   requestPasswordReset,
   resetPassword,
+  fetchMfaSetup,
+  enableMfa,
+  disableMfa,
   updateTicket,
   fetchUsers,
   createUser,
@@ -264,6 +268,11 @@ function App() {
   const [auditLogFilter, setAuditLogFilter] = useState('all')
   const [auditLogSearchTerm, setAuditLogSearchTerm] = useState('')
   const [healthViewFilter, setHealthViewFilter] = useState('all')
+  const [mfaCode, setMfaCode] = useState('')
+  const [mfaRequired, setMfaRequired] = useState(false)
+  const [mfaSetupSecret, setMfaSetupSecret] = useState('')
+  const [mfaSetupUri, setMfaSetupUri] = useState('')
+  const [mfaManageCode, setMfaManageCode] = useState('')
   const [busyActions, setBusyActions] = useState({})
   const [activityMessage, setActivityMessage] = useState('')
   const [scanMode, setScanMode] = useState(null)
@@ -482,9 +491,16 @@ function App() {
       return
     }
     try {
-      await login(normalizedUsername, password)
+      const result = await login(normalizedUsername, password, mfaCode)
+      if (result?.mfaRequired) {
+        setMfaRequired(true)
+        setAuthMessage('MFA is enabled for this account. Enter your authenticator code to continue.')
+        return
+      }
       setCurrentRole(decodeRoleFromToken(localStorage.getItem('access_token')) || 'analyst')
       setPassword('')
+      setMfaCode('')
+      setMfaRequired(false)
       setIsLoggedIn(true)
     } catch (err) {
       setError(err.message || 'Login failed')
@@ -494,6 +510,8 @@ function App() {
   const switchAuthMode = (mode, clearMessage = true) => {
     setAuthMode(mode)
     setError('')
+    setMfaRequired(false)
+    setMfaCode('')
     if (clearMessage) setAuthMessage('')
   }
 
@@ -597,7 +615,8 @@ function App() {
     }
   }
 
-  const onLogout = (reason = '') => {
+  const onLogout = async (reason = '') => {
+    await logoutSession().catch(() => {})
     localStorage.removeItem('access_token')
     setIsLoggedIn(false)
     setCurrentUser(null)
@@ -608,7 +627,55 @@ function App() {
     setSelectedTicket(null)
     setBusyActions({})
     setActivityMessage('')
+    setMfaCode('')
+    setMfaRequired(false)
+    setMfaSetupSecret('')
+    setMfaSetupUri('')
+    setMfaManageCode('')
     if (reason) setAuthMessage(reason)
+  }
+
+  const onSetupMfa = async () => {
+    setError('')
+    try {
+      const setup = await fetchMfaSetup()
+      if (setup === null) return handleUnauthorized()
+      setMfaSetupSecret(setup.secret || '')
+      setMfaSetupUri(setup.otpauthUrl || '')
+      setAuthMessage('MFA secret generated. Add it to your authenticator app, then enter a code to enable MFA.')
+    } catch (err) {
+      setError(err.message || 'Failed to initialize MFA setup')
+    }
+  }
+
+  const onEnableMfa = async () => {
+    setError('')
+    try {
+      const result = await enableMfa(mfaManageCode)
+      if (result === null) return handleUnauthorized()
+      setMfaManageCode('')
+      setMfaSetupSecret('')
+      setMfaSetupUri('')
+      setAuthMessage('MFA enabled successfully. Future logins will require a code.')
+      await loadAll()
+    } catch (err) {
+      setError(err.message || 'Failed to enable MFA')
+    }
+  }
+
+  const onDisableMfa = async () => {
+    setError('')
+    try {
+      const result = await disableMfa(mfaManageCode)
+      if (result === null) return handleUnauthorized()
+      setMfaManageCode('')
+      setMfaSetupSecret('')
+      setMfaSetupUri('')
+      setAuthMessage('MFA disabled successfully.')
+      await loadAll()
+    } catch (err) {
+      setError(err.message || 'Failed to disable MFA')
+    }
   }
 
   useEffect(() => {
@@ -1790,6 +1857,14 @@ function App() {
           userNotifications={userNotifications}
           onNotificationToggle={handleNotificationToggle}
           isLoggedIn={isLoggedIn}
+          mfaEnabled={Boolean(currentUser?.mfaEnabled)}
+          mfaSetupSecret={mfaSetupSecret}
+          mfaSetupUri={mfaSetupUri}
+          mfaManageCode={mfaManageCode}
+          onMfaManageCodeChange={setMfaManageCode}
+          onSetupMfa={onSetupMfa}
+          onEnableMfa={onEnableMfa}
+          onDisableMfa={onDisableMfa}
         />
 
         <AuditPanel
@@ -1857,7 +1932,19 @@ function App() {
                 <FieldWithHint help="Enter your CCC password. Authentication is required before the dashboard can pull tickets, health, and audit data.">
                   <input type="password" value={password} placeholder="Password" onChange={(e) => setPassword(e.target.value)} required />
                 </FieldWithHint>
-                <button type="submit">Login</button>
+                {mfaRequired && (
+                  <FieldWithHint help="Enter the current 6-digit code from your authenticator app.">
+                    <input
+                      value={mfaCode}
+                      placeholder="MFA code"
+                      onChange={(e) => setMfaCode(e.target.value)}
+                      inputMode="numeric"
+                      pattern="[0-9]{6,8}"
+                      required
+                    />
+                  </FieldWithHint>
+                )}
+                <button type="submit">{mfaRequired ? 'Verify MFA & Login' : 'Login'}</button>
                 <div className="auth-links">
                   <button type="button" className="text-btn" onClick={() => switchAuthMode('forgot-username')}>Forgot Username</button>
                   <button type="button" className="text-btn" onClick={() => switchAuthMode('forgot-password-request')}>Forgot Password</button>

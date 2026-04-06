@@ -42,6 +42,7 @@ export const initModels = async () => {
   const networkDeviceModel = (await import('./networkDevice.js')).default(sequelize);
   const databaseAssetModel = (await import('./databaseAsset.js')).default(sequelize);
   const patchTaskModel = (await import('./patchTask.js')).default(sequelize);
+  const revokedTokenModel = (await import('./revokedToken.js')).default(sequelize);
 
   // Define relationships by SCJ ID instead of numeric PK.
   userModel.hasMany(ticketModel, { foreignKey: 'assigneeId', sourceKey: 'scjId', as: 'assignedTickets', constraints: false });
@@ -96,6 +97,8 @@ export const initModels = async () => {
     await ensureColumn('Users', 'email', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'telegramNumber', { type: DataTypes.STRING(32), allowNull: true });
     await ensureColumn('Users', 'notifyEmail', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true });
+    await ensureColumn('Users', 'mfaEnabled', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
+    await ensureColumn('Users', 'mfaSecret', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCode', { type: DataTypes.STRING(16), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCodeExpiresAt', { type: DataTypes.DATE, allowNull: true });
     await ensureColumn('Tickets', 'lifecycleStage', { type: DataTypes.STRING(64), allowNull: false, defaultValue: 'identified' });
@@ -129,6 +132,8 @@ export const initModels = async () => {
     await ensureColumn('SecurityFindings', 'executiveSummary', { type: DataTypes.TEXT, allowNull: true });
     await ensureColumn('SecurityFindings', 'businessImpact', { type: DataTypes.TEXT, allowNull: true });
     await ensureColumn('SecurityFindings', 'remediationRecommendation', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('RevokedTokens', 'jti', { type: DataTypes.STRING(64), allowNull: false, unique: true });
+    await ensureColumn('RevokedTokens', 'expiresAt', { type: DataTypes.DATE, allowNull: true });
 
     const ticketSchema = await queryInterface.describeTable('Tickets');
     if (ticketSchema.assigneeId && ticketSchema.assigneeId.type !== 'VARCHAR(14)') {
@@ -166,5 +171,6 @@ export const initModels = async () => {
     networkDeviceModel,
     databaseAssetModel,
     patchTaskModel,
+    revokedTokenModel,
   };
 };

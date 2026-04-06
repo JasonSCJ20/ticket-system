@@ -45,6 +45,12 @@ export const CONFIG = {
   // Secret key for JWT signing (change in production)
   SECRET_KEY: process.env.SECRET_KEY || 'PLEASE_CHANGE_ME',
   ACCESS_TOKEN_TTL: process.env.ACCESS_TOKEN_TTL || '15m',
+  MFA_ISSUER: process.env.MFA_ISSUER || 'Cybersecurity Command Centre',
+  SSO_ENABLED: String(process.env.SSO_ENABLED || 'false').toLowerCase() === 'true',
+  SSO_PROVIDER: process.env.SSO_PROVIDER || 'oidc',
+  SSO_ISSUER: process.env.SSO_ISSUER || '',
+  SSO_CLIENT_ID: process.env.SSO_CLIENT_ID || '',
+  SSO_CALLBACK_URL: process.env.SSO_CALLBACK_URL || '',
   TRUST_PROXY: process.env.TRUST_PROXY || 'false',
   API_AUTH_RATE_LIMIT_WINDOW_MS: Number(process.env.API_AUTH_RATE_LIMIT_WINDOW_MS || 60_000),
   API_AUTH_RATE_LIMIT_MAX: Number(process.env.API_AUTH_RATE_LIMIT_MAX || 1200),

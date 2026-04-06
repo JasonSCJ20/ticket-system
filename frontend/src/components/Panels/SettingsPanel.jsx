@@ -25,6 +25,14 @@ function SettingsPanel({
   userNotifications,
   onNotificationToggle,
   isLoggedIn,
+  mfaEnabled,
+  mfaSetupSecret,
+  mfaSetupUri,
+  mfaManageCode,
+  onMfaManageCodeChange,
+  onSetupMfa,
+  onEnableMfa,
+  onDisableMfa,
 }) {
   const [showPasswordChange, setShowPasswordChange] = useState(false)
   const [newPassword, setNewPassword] = useState('')
@@ -173,6 +181,41 @@ function SettingsPanel({
             </div>
           </div>
         )}
+
+        <div className="field-with-hint" style={{ marginTop: '0.75rem' }}>
+          <p className="muted-copy"><strong>MFA Status:</strong> {mfaEnabled ? 'Enabled' : 'Disabled'}</p>
+          {!mfaEnabled && (
+            <button className="ghost-btn" onClick={onSetupMfa}>
+              Start MFA Setup
+            </button>
+          )}
+          {!!mfaSetupSecret && (
+            <div className="info-box" style={{ marginTop: '0.5rem' }}>
+              <p><strong>Authenticator Secret:</strong> {mfaSetupSecret}</p>
+              {mfaSetupUri && <p className="muted-copy">otpauth URL generated. Add this account in your authenticator app.</p>}
+            </div>
+          )}
+          <input
+            type="text"
+            placeholder="MFA code"
+            value={mfaManageCode}
+            onChange={(e) => onMfaManageCodeChange(e.target.value)}
+            inputMode="numeric"
+            pattern="[0-9]{6,8}"
+            style={{ marginTop: '0.5rem' }}
+          />
+          <div className="button-row" style={{ marginTop: '0.5rem' }}>
+            {!mfaEnabled ? (
+              <button className="ghost-btn" onClick={onEnableMfa}>
+                Enable MFA
+              </button>
+            ) : (
+              <button className="ghost-btn secondary" onClick={onDisableMfa}>
+                Disable MFA
+              </button>
+            )}
+          </div>
+        </div>
       </div>
 
       <div className="settings-section">
