@@ -137,6 +137,21 @@ export async function createAccount(payload) {
   return r.json();
 }
 
+export async function updateMyProfile(payload) {
+  const r = await fetch(`${API_URL}/me/profile`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify(payload),
+  });
+  if (r.status === 401) return null;
+  if (!r.ok) await parseErrorResponse(r, 'Failed to update profile');
+  const data = await r.json();
+  if (data?.access_token) {
+    localStorage.setItem('access_token', data.access_token);
+  }
+  return data;
+}
+
 /**
  * Recovers username by account email.
  * @param {string} email
@@ -721,6 +736,57 @@ export async function runActiveSecurityScan() {
 }
 
 /**
+ * Fetches auditable security scan run records.
+ * Returns null when unauthorized.
+ * @param {Object} [params]
+ * @returns {Promise<Object|null>}
+ */
+export async function fetchSecurityScanRuns(params = {}) {
+  const search = new URLSearchParams();
+  if (params.assetType) search.set('assetType', params.assetType);
+  if (params.assetId) search.set('assetId', String(params.assetId));
+  if (params.toolId) search.set('toolId', String(params.toolId));
+  if (params.limit) search.set('limit', String(params.limit));
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const r = await fetch(`${API_URL}/security/scan/runs${suffix}`, { headers: getAuthHeaders() });
+  if (r.status === 401) return null;
+  if (!r.ok) await parseErrorResponse(r, 'Failed to load security scan runs');
+  return r.json();
+}
+
+export async function fetchSocLiveFeed(params = {}) {
+  const search = new URLSearchParams();
+  if (params.limit) search.set('limit', String(params.limit));
+  if (params.since) search.set('since', String(params.since));
+  const suffix = search.toString() ? `?${search.toString()}` : '';
+  const r = await fetch(`${API_URL}/security/soc/live-feed${suffix}`, { headers: getAuthHeaders() });
+  if (r.status === 401) return null;
+  if (!r.ok) return null;
+  return r.json();
+}
+
+export async function fetchSocThreatOrigins() {
+  const r = await fetch(`${API_URL}/security/soc/threat-origins`, { headers: getAuthHeaders() });
+  if (r.status === 401) return null;
+  if (!r.ok) return null;
+  return r.json();
+}
+
+export async function fetchSocReconDetections() {
+  const r = await fetch(`${API_URL}/security/soc/recon-detections`, { headers: getAuthHeaders() });
+  if (r.status === 401) return null;
+  if (!r.ok) return null;
+  return r.json();
+}
+
+export async function fetchSocSchedulerState() {
+  const r = await fetch(`${API_URL}/security/soc/scheduler-state`, { headers: getAuthHeaders() });
+  if (r.status === 401) return null;
+  if (!r.ok) return null;
+  return r.json();
+}
+
+/**
  * Fetches security findings, optionally filtered by status.
  * Returns null when unauthorized.
  * @param {string} [status='']
@@ -835,6 +901,46 @@ export async function fetchAuditLogs() {
   if (r.status === 401) return null
   if (r.status === 403) return { forbidden: true, rows: [] }
   if (!r.ok) await parseErrorResponse(r, 'Failed to load governance audit logs')
+  return r.json()
+}
+
+/**
+ * Fetches workforce telemetry for governance oversight.
+ * Returns { forbidden: true, users: [], summary: {} } when access is denied.
+ * Returns null when unauthorized.
+ * @returns {Promise<Object|null>}
+ */
+export async function fetchWorkforceTelemetry() {
+  const r = await fetch(`${API_URL}/governance/workforce-telemetry`, { headers: getAuthHeaders() })
+  if (r.status === 401) return null
+  if (r.status === 403) return { forbidden: true, users: [], summary: {} }
+  if (!r.ok) await parseErrorResponse(r, 'Failed to load workforce telemetry')
+  return r.json()
+}
+
+/**
+ * Sends a periodic heartbeat so the server knows the browser session is active.
+ * Fire-and-forget — never throws.
+ * @returns {Promise<void>}
+ */
+export async function sendHeartbeat() {
+  try {
+    await fetch(`${API_URL}/heartbeat`, { method: 'POST', headers: getAuthHeaders() })
+  } catch {
+    // best-effort, ignore all errors
+  }
+}
+
+/**
+ * Fetches per-notification delivery ledger entries for governance oversight.
+ * @param {number} [limit=200]
+ * @returns {Promise<Array|null>}
+ */
+export async function fetchNotificationLedger(limit = 200) {
+  const r = await fetch(`${API_URL}/governance/notification-ledger?limit=${limit}`, { headers: getAuthHeaders() })
+  if (r.status === 401) return null
+  if (r.status === 403) return []
+  if (!r.ok) await parseErrorResponse(r, 'Failed to load notification ledger')
   return r.json()
 }
 

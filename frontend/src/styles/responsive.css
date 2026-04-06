@@ -45,6 +45,11 @@
   .patch-board-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .network-flip-grid,
+  .soc-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 700px) {
@@ -80,10 +85,28 @@
   .network-traffic-grid,
   .network-app-grid,
   .network-app-metrics,
+  .network-flip-grid,
+  .soc-kpi-grid,
   .connected-device-grid,
   .connected-device-metrics,
   .patch-board-grid {
     grid-template-columns: 1fr;
+  }
+
+  .network-flip-card {
+    min-height: 0;
+  }
+
+  .network-flip-inner {
+    min-height: 120px;
+  }
+
+  .soc-kpi-flip-card {
+    min-height: 0;
+  }
+
+  .soc-kpi-back ul {
+    max-height: 140px;
   }
 
   .patch-card,
@@ -152,6 +175,11 @@
 
   .ai-sidecar-kpis {
     grid-template-columns: 1fr;
+  }
+
+  .soc-drilldown-banner {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

@@ -21,6 +21,7 @@ import {
   fetchMfaSetup,
   enableMfa,
   disableMfa,
+  updateMyProfile,
   updateTicket,
   fetchUsers,
   createUser,
@@ -45,6 +46,11 @@ import {
   registerSecurityApplication,
   runPassiveSecurityScan,
   runActiveSecurityScan,
+  fetchSecurityScanRuns,
+  fetchSocLiveFeed,
+  fetchSocThreatOrigins,
+  fetchSocReconDetections,
+  fetchSocSchedulerState,
   fetchSecurityFindings,
   updateFindingStatus,
   confirmSecurityFinding,
@@ -52,6 +58,9 @@ import {
   fetchExecutiveReport,
   fetchTechnicalReport,
   fetchAuditLogs,
+  fetchWorkforceTelemetry,
+  sendHeartbeat,
+  fetchNotificationLedger,
   generateAssistantTriage,
   fetchAssistantCommandCentre,
   analyzeAssistantTicket,
@@ -67,13 +76,20 @@ import DeviceRegistrationForm from './components/Forms/DeviceRegistrationForm'
 import DatabaseRegistrationForm from './components/Forms/DatabaseRegistrationForm'
 import ApplicationRegistrationForm from './components/Forms/ApplicationRegistrationForm'
 import PatchManagementForm from './components/Forms/PatchManagementForm'
-import SituationTile from './components/Tiles/SituationTile'
 
 const SCJ_ID_REGEX = /^\d{8}-\d{5}$/
 const SCJ_ID_EXAMPLE = '00000000-00000'
 const NHNE_EMAIL_DOMAIN = '@nhne.org.za'
 const LIFECYCLE_STAGES = ['identified', 'triaged', 'contained', 'eradicated', 'recovered', 'postmortem', 'closed']
 const APP_NAME = 'Cybersecurity Command Centre'
+const OPERATIONAL_TEAM_OPTIONS = ['Network', 'Developer', 'Hardware']
+const AUDIENCE_CODE_OPTIONS = [
+  { code: 'STAFF', label: 'CCC Staff' },
+  { code: 'TJN', label: 'TJN' },
+  { code: 'GJN', label: 'GJN' },
+  { code: 'BJN', label: 'BJN' },
+  { code: 'DGSN', label: 'DGSN' },
+]
 
 function normalizePersonName(value) {
   return value.trim().replace(/\s+/g, ' ')
@@ -102,6 +118,43 @@ function decodeRoleFromToken(token) {
   }
 }
 
+function formatDateTime(value) {
+  return value ? new Date(value).toLocaleString() : 'Not run yet'
+}
+
+function csvEscape(value) {
+  const text = value == null ? '' : String(value)
+  if (!/[",\n]/.test(text)) return text
+  return `"${text.replace(/"/g, '""')}"`
+}
+
+function exportScanRunsCsv(filename, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return
+  const header = ['Completed At', 'Tool', 'Mode', 'Status', 'Asset Type', 'Asset Name', 'Asset Ref', 'Findings', 'New Findings', 'Trigger', 'Actor', 'Detail']
+  const body = rows.map((row) => ([
+    row.completedAt || row.startedAt || '',
+    row.toolName || '',
+    row.mode || '',
+    row.status || '',
+    row.assetType || '',
+    row.assetName || '',
+    row.assetRef || '',
+    row.findingsCount ?? 0,
+    row.newFindingsCount ?? 0,
+    row.triggerSource || '',
+    row.actor || '',
+    row.detail || '',
+  ].map(csvEscape).join(',')))
+  const csv = [header.map(csvEscape).join(','), ...body].join('\n')
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 function FieldWithHint({ help, children }) {
   return (
     <div className="field-with-hint">
@@ -116,7 +169,6 @@ function App() {
   const [error, setError] = useState('')
   const [isLoggedIn, setIsLoggedIn] = useState(!!localStorage.getItem('access_token'))
   const [currentRole, setCurrentRole] = useState(decodeRoleFromToken(localStorage.getItem('access_token')) || 'analyst')
-  const isAdmin = currentRole === 'admin'
 
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -127,8 +179,17 @@ function App() {
   const [registerSurname, setRegisterSurname] = useState('')
   const [registerScjId, setRegisterScjId] = useState('')
   const [registerEmail, setRegisterEmail] = useState('')
+  const [registerTelegramNumber, setRegisterTelegramNumber] = useState('')
+  const [registerTelegramChatId, setRegisterTelegramChatId] = useState('')
+  const [registerAudienceCode, setRegisterAudienceCode] = useState('')
+  const [registerOperationalTeams, setRegisterOperationalTeams] = useState([])
   const [registerPassword, setRegisterPassword] = useState('')
   const [registerPasswordConfirm, setRegisterPasswordConfirm] = useState('')
+  const [profileTelegramNumber, setProfileTelegramNumber] = useState('')
+  const [profileTelegramChatId, setProfileTelegramChatId] = useState('')
+  const [profileAudienceCode, setProfileAudienceCode] = useState('')
+  const [profileOperationalTeams, setProfileOperationalTeams] = useState([])
+  const [profileMessage, setProfileMessage] = useState('')
 
   const [forgotUsernameEmail, setForgotUsernameEmail] = useState('')
   const [resetIdentifier, setResetIdentifier] = useState('')
@@ -145,12 +206,21 @@ function App() {
   const [executiveMetrics, setExecutiveMetrics] = useState(null)
   const [securityApplications, setSecurityApplications] = useState([])
   const [securityFindings, setSecurityFindings] = useState([])
+  const [scanRunRecords, setScanRunRecords] = useState([])
+  const [socLiveFeedData, setSocLiveFeedData] = useState([])
+  const [socThreatOrigins, setSocThreatOrigins] = useState([])
+  const [socReconDetections, setSocReconDetections] = useState([])
+  const [socSchedulerState, setSocSchedulerState] = useState([])
   const [threatIntelOverview, setThreatIntelOverview] = useState(null)
   const [networkVisibilityOverview, setNetworkVisibilityOverview] = useState(null)
   const [networkDevices, setNetworkDevices] = useState([])
   const [databaseOverview, setDatabaseOverview] = useState(null)
   const [patchOverview, setPatchOverview] = useState({ summary: null, grouped: null, items: [] })
   const [currentUser, setCurrentUser] = useState(null)
+  const isAdmin = currentRole === 'admin'
+  const isTjnManager = String(currentUser?.audienceCode || '').trim().toUpperCase() === 'TJN'
+  const isGjnManager = String(currentUser?.audienceCode || '').trim().toUpperCase() === 'GJN'
+  const canViewGovernance = isAdmin || isTjnManager || isGjnManager
   const derivedRegisterUsername = useMemo(
     () => buildDerivedUsername(registerName, registerSurname),
     [registerName, registerSurname],
@@ -158,6 +228,8 @@ function App() {
   const [executiveReportData, setExecutiveReportData] = useState(null)
   const [technicalReportData, setTechnicalReportData] = useState(null)
   const [auditLogs, setAuditLogs] = useState([])
+  const [workforceTelemetry, setWorkforceTelemetry] = useState({ summary: {}, users: [] })
+  const [notificationLedger, setNotificationLedger] = useState([])
 
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -240,23 +312,9 @@ function App() {
   const [presentationMode, setPresentationMode] = useState('executive')
   const [showAllIntrusions, setShowAllIntrusions] = useState(false)
   const [lastRefreshAt, setLastRefreshAt] = useState(null)
-  const [situationExpanded, setSituationExpanded] = useState(false)
-  const [situationPosition, setSituationPosition] = useState({ x: null, y: 14 })
-  const [isDraggingSituation, setIsDraggingSituation] = useState(false)
-  const [snapSituationToCorner, setSnapSituationToCorner] = useState(localStorage.getItem('ccc_situation_snap_default') !== 'false')
-  const [criticalPulse, setCriticalPulse] = useState(false)
-  const previousCriticalCountRef = useRef(null)
   const loadAllPromiseRef = useRef(null)
 
-  const situationPositionStorageKey = useMemo(() => {
-    const identity = currentUser?.id || currentUser?.username || currentRole || 'guest'
-    return `ccc_situation_position_${identity}`
-  }, [currentUser?.id, currentUser?.username, currentRole])
 
-  const situationSnapStorageKey = useMemo(() => {
-    const identity = currentUser?.id || currentUser?.username || currentRole || 'guest'
-    return `ccc_situation_snap_${identity}`
-  }, [currentUser?.id, currentUser?.username, currentRole])
 
   // Top Navigation Bar State
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false)
@@ -277,6 +335,16 @@ function App() {
   const [activityMessage, setActivityMessage] = useState('')
   const [scanMode, setScanMode] = useState(null)
   const [flippedPatchCards, setFlippedPatchCards] = useState({})
+  const [flippedNetworkCards, setFlippedNetworkCards] = useState({})
+  const [flippedSocKpiCards, setFlippedSocKpiCards] = useState({})
+  const [highlightedFindingId, setHighlightedFindingId] = useState(null)
+  const [socSelectedTalker, setSocSelectedTalker] = useState('')
+  const [socSelectedHunt, setSocSelectedHunt] = useState('')
+  const [socAutoAnalyzeOnPivot, setSocAutoAnalyzeOnPivot] = useState(false)
+  const [socLiveFeedShowAll, setSocLiveFeedShowAll] = useState(false)
+  const [socOriginsShowAll, setSocOriginsShowAll] = useState(false)
+  const [socReconShowAll, setSocReconShowAll] = useState(false)
+  const [socToolsShowAll, setSocToolsShowAll] = useState(false)
   const [patchLaneOrder, setPatchLaneOrder] = useState({})
   const [patchDragState, setPatchDragState] = useState({ sourceLaneKey: '', sourceTaskId: null, overLaneKey: '', overTaskId: null })
 
@@ -296,6 +364,17 @@ function App() {
     [busyActions],
   )
 
+  const isOperationalStaffUser = currentUser?.audienceCode === 'STAFF'
+  const userOperationalTeams = useMemo(
+    () => (Array.isArray(currentUser?.operationalTeams) ? currentUser.operationalTeams : []),
+    [currentUser?.operationalTeams],
+  )
+  const hasOperationalTeam = (team) => userOperationalTeams.includes(team)
+  const canAccessApplications = isAdmin || !isOperationalStaffUser || hasOperationalTeam('Developer')
+  const canAccessDatabaseMonitor = isAdmin || !isOperationalStaffUser || hasOperationalTeam('Developer')
+  const canAccessConnectedDevices = isAdmin || !isOperationalStaffUser || hasOperationalTeam('Hardware')
+  const canAccessNetworkMonitor = isAdmin || !isOperationalStaffUser || hasOperationalTeam('Network')
+
   const runBusyAction = async (actionKey, message, operation) => {
     setActionBusy(actionKey, true)
     setActivityMessage(message)
@@ -313,6 +392,32 @@ function App() {
 
     const run = (async () => {
       try {
+      const me = await fetchCurrentUser()
+      if (me === null) return handleUnauthorized()
+
+      setCurrentUser(me)
+      setProfileTelegramNumber(me?.telegramNumber || '')
+      setProfileTelegramChatId(me?.telegramChatId || '')
+      setProfileAudienceCode(me?.audienceCode || '')
+      setProfileOperationalTeams(Array.isArray(me?.operationalTeams) ? me.operationalTeams : [])
+
+      const meIsAdmin = me?.role === 'admin'
+      const meIsTjnManager = String(me?.audienceCode || '').trim().toUpperCase() === 'TJN'
+      const meIsGjnManager = String(me?.audienceCode || '').trim().toUpperCase() === 'GJN'
+      const meCanViewGovernance = meIsAdmin || meIsTjnManager || meIsGjnManager
+      const meIsOperationalStaff = me?.audienceCode === 'STAFF'
+      const meOperationalTeams = Array.isArray(me?.operationalTeams) ? me.operationalTeams : []
+      const meHasTeam = (team) => meOperationalTeams.includes(team)
+      const meCanAccessApplications = meIsAdmin || !meIsOperationalStaff || meHasTeam('Developer')
+      const meCanAccessDatabaseMonitor = meIsAdmin || !meIsOperationalStaff || meHasTeam('Developer')
+      const meCanAccessConnectedDevices = meIsAdmin || !meIsOperationalStaff || meHasTeam('Hardware')
+      const meCanAccessNetworkMonitor = meIsAdmin || !meIsOperationalStaff || meHasTeam('Network')
+
+      if (me?.profileCompletionRequired) {
+        setLastRefreshAt(new Date().toISOString())
+        return
+      }
+
       const [
         usersData,
         ticketsData,
@@ -322,13 +427,13 @@ function App() {
         metrics,
         apps,
         findings,
+        scanRuns,
         threatIntel,
         networkVisibility,
         devices,
         dbOverview,
         patchData,
         assistantCommandData,
-        me,
         technical,
       ] = await Promise.all([
         fetchUsers(),
@@ -337,19 +442,19 @@ function App() {
         fetchFortressPosture(),
         fetchExecutiveImpact(),
         fetchExecutiveTicketMetrics(),
-        fetchSecurityApplications(),
+        meCanAccessApplications ? fetchSecurityApplications() : Promise.resolve([]),
         fetchSecurityFindings(),
+        fetchSecurityScanRuns({ limit: 800 }),
         fetchThreatIntelOverview(),
-        fetchNetworkVisibilityOverview(),
-        fetchNetworkDevices(),
-        fetchDatabaseOverview(),
+        meCanAccessNetworkMonitor ? fetchNetworkVisibilityOverview() : Promise.resolve({}),
+        meCanAccessConnectedDevices ? fetchNetworkDevices() : Promise.resolve([]),
+        meCanAccessDatabaseMonitor ? fetchDatabaseOverview() : Promise.resolve({ summary: null, items: [] }),
         fetchPatchTasks(),
         fetchAssistantCommandCentre(),
-        fetchCurrentUser(),
         fetchTechnicalReport(),
       ])
 
-      if ([usersData, ticketsData, summary, fortress, impact, metrics, apps, findings, threatIntel, networkVisibility, devices, dbOverview, patchData, assistantCommandData, me, technical].some((v) => v === null)) return handleUnauthorized()
+      if ([usersData, ticketsData, summary, fortress, impact, metrics, apps, findings, scanRuns, threatIntel, networkVisibility, devices, patchData, assistantCommandData, technical].some((v) => v === null)) return handleUnauthorized()
 
       setUsers(usersData)
       setTickets(ticketsData)
@@ -359,6 +464,7 @@ function App() {
       setExecutiveMetrics(metrics)
       setSecurityApplications(apps)
       setSecurityFindings(findings)
+      setScanRunRecords(Array.isArray(scanRuns?.rows) ? scanRuns.rows : [])
       setThreatIntelOverview(threatIntel)
       setNetworkVisibilityOverview(networkVisibility)
       setNetworkDevices(Array.isArray(devices) ? devices : [])
@@ -369,18 +475,24 @@ function App() {
         items: Array.isArray(patchData?.items) ? patchData.items : [],
       })
       setAssistantCommand(assistantCommandData)
-      setCurrentUser(me)
       setTechnicalReportData(technical)
       setLastRefreshAt(new Date().toISOString())
 
-      if (isAdmin) {
-        const [executive, logs] = await Promise.all([fetchExecutiveReport(), fetchAuditLogs()])
-        if (executive === null || logs === null) return handleUnauthorized()
+      if (meCanViewGovernance) {
+        const [executive, logs, workforce, ledger] = await Promise.all([fetchExecutiveReport(), fetchAuditLogs(), fetchWorkforceTelemetry(), fetchNotificationLedger()])
+        if (executive === null || logs === null || workforce === null || ledger === null) return handleUnauthorized()
         setExecutiveReportData(executive)
         setAuditLogs(Array.isArray(logs) ? logs : [])
+        setWorkforceTelemetry({
+          summary: workforce?.summary || {},
+          users: Array.isArray(workforce?.users) ? workforce.users : [],
+        })
+        setNotificationLedger(Array.isArray(ledger) ? ledger : [])
       } else {
         setExecutiveReportData({ forbidden: true })
         setAuditLogs([])
+        setWorkforceTelemetry({ summary: {}, users: [] })
+        setNotificationLedger([])
       }
       } catch (err) {
         setError(err.message || 'Failed to refresh dashboard data.')
@@ -410,46 +522,53 @@ function App() {
     return () => clearInterval(refreshTimer)
   }, [isLoggedIn])
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    const savedPositionRaw = localStorage.getItem(situationPositionStorageKey)
-    const savedSnapRaw = localStorage.getItem(situationSnapStorageKey)
-
-    if (savedSnapRaw !== null) {
-      setSnapSituationToCorner(savedSnapRaw !== 'false')
-    }
-
-    if (!savedPositionRaw) {
-      const defaultX = Math.max(12, window.innerWidth - 300)
-      setSituationPosition({ x: defaultX, y: 14 })
-      return
-    }
-
+  const loadSocFeed = async () => {
     try {
-      const parsed = JSON.parse(savedPositionRaw)
-      if (typeof parsed?.x === 'number' && typeof parsed?.y === 'number') {
-        setSituationPosition({ x: parsed.x, y: parsed.y })
-        return
-      }
+      const [feed, origins, recon, sched] = await Promise.all([
+        fetchSocLiveFeed({ limit: 80 }),
+        fetchSocThreatOrigins(),
+        fetchSocReconDetections(),
+        fetchSocSchedulerState(),
+      ])
+      if (feed) setSocLiveFeedData(Array.isArray(feed.events) ? feed.events : [])
+      if (origins) setSocThreatOrigins(Array.isArray(origins.origins) ? origins.origins : [])
+      if (recon) setSocReconDetections(Array.isArray(recon.detections) ? recon.detections : [])
+      if (sched) setSocSchedulerState(Array.isArray(sched.state) ? sched.state : [])
     } catch {
-      // Fall back to default when storage value is invalid.
+      // Non-critical feed refresh failure: keep UI stable if this request fails.
     }
+  }
 
-    const defaultX = Math.max(12, window.innerWidth - 300)
-    setSituationPosition({ x: defaultX, y: 14 })
-  }, [situationPositionStorageKey, situationSnapStorageKey])
+  // SOC live feed: fast-poll every 10s only when SOC tab is active
+  useEffect(() => {
+    if (!isLoggedIn || activeTab !== 'soc') return
+    loadSocFeed()
+    const socTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      loadSocFeed()
+    }, 10000)
+    return () => clearInterval(socTimer)
+  }, [isLoggedIn, activeTab])
+
+  // Heartbeat: every 30s, silently notify backend the browser tab is active
+  useEffect(() => {
+    if (!isLoggedIn) return
+    const heartbeatTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      sendHeartbeat()
+    }, 30000)
+    return () => clearInterval(heartbeatTimer)
+  }, [isLoggedIn])
 
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    if (situationPosition.x === null || situationPosition.y === null) return
-    localStorage.setItem(situationPositionStorageKey, JSON.stringify(situationPosition))
-  }, [situationPosition, situationPositionStorageKey])
+    if (canViewGovernance) return
+    setAuditPanelOpen(false)
+    setFortressPanelOpen(false)
+  }, [canViewGovernance])
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    localStorage.setItem('ccc_situation_snap_default', snapSituationToCorner ? 'true' : 'false')
-    localStorage.setItem(situationSnapStorageKey, snapSituationToCorner ? 'true' : 'false')
-  }, [snapSituationToCorner, situationSnapStorageKey])
+
+
+
 
   // Update current date/time on a light cadence to avoid full-app re-render churn.
   useEffect(() => {
@@ -510,9 +629,18 @@ function App() {
   const switchAuthMode = (mode, clearMessage = true) => {
     setAuthMode(mode)
     setError('')
+    setProfileMessage('')
     setMfaRequired(false)
     setMfaCode('')
     if (clearMessage) setAuthMessage('')
+  }
+
+  const toggleTeamSelection = (setTeams, team) => {
+    setTeams((existing) => {
+      if (existing.includes(team)) return existing.filter((item) => item !== team)
+      if (existing.length >= 2) return existing
+      return [...existing, team]
+    })
   }
 
   const onCreateAccount = async (e) => {
@@ -522,6 +650,9 @@ function App() {
 
     const normalizedEmail = registerEmail.trim().toLowerCase()
     const normalizedScjId = registerScjId.trim()
+    const normalizedTelegramNumber = registerTelegramNumber.trim()
+    const normalizedTelegramChatId = registerTelegramChatId.trim()
+    const isOperationalStaff = registerAudienceCode === 'STAFF'
     const passwordError = validateRegistrationPassword(registerPassword)
 
     if (!registerName.trim() || !registerSurname.trim()) {
@@ -534,6 +665,22 @@ function App() {
     }
     if (!normalizedEmail.endsWith(NHNE_EMAIL_DOMAIN)) {
       setError('Email address must use the @nhne.org.za domain')
+      return
+    }
+    if (!registerAudienceCode) {
+      setError('Select one audience role')
+      return
+    }
+    if (isOperationalStaff && !normalizedTelegramNumber) {
+      setError('Telegram phone number is required for CCC staff')
+      return
+    }
+    if (isOperationalStaff && !normalizedTelegramChatId) {
+      setError('Telegram chat ID is required for CCC staff')
+      return
+    }
+    if (isOperationalStaff && (registerOperationalTeams.length < 1 || registerOperationalTeams.length > 2)) {
+      setError('Select one or two operational teams')
       return
     }
     if (passwordError) {
@@ -552,6 +699,10 @@ function App() {
         surname: normalizePersonName(registerSurname),
         scjId: normalizedScjId,
         email: normalizedEmail,
+        telegramNumber: isOperationalStaff ? normalizedTelegramNumber : undefined,
+        telegramChatId: isOperationalStaff ? normalizedTelegramChatId : undefined,
+        audienceCode: registerAudienceCode,
+        operationalTeams: isOperationalStaff ? registerOperationalTeams : [],
         password: registerPassword,
       })
       setAuthMessage('Account created successfully. You can now log in.')
@@ -560,6 +711,10 @@ function App() {
       setRegisterSurname('')
       setRegisterScjId('')
       setRegisterEmail('')
+      setRegisterTelegramNumber('')
+      setRegisterTelegramChatId('')
+      setRegisterAudienceCode('')
+      setRegisterOperationalTeams([])
       setRegisterPassword('')
       setRegisterPasswordConfirm('')
       switchAuthMode('login', false)
@@ -615,6 +770,44 @@ function App() {
     }
   }
 
+  const onCompleteProfile = async (e) => {
+    e.preventDefault()
+    setError('')
+    setProfileMessage('')
+    if (!profileAudienceCode) {
+      setError('Select one audience role')
+      return
+    }
+    const isOperationalStaff = profileAudienceCode === 'STAFF'
+
+    if (isOperationalStaff && !profileTelegramNumber.trim()) {
+      setError('Telegram phone number is required for CCC staff')
+      return
+    }
+    if (isOperationalStaff && !profileTelegramChatId.trim()) {
+      setError('Telegram chat ID is required for CCC staff')
+      return
+    }
+    if (isOperationalStaff && (profileOperationalTeams.length < 1 || profileOperationalTeams.length > 2)) {
+      setError('Select one or two operational teams')
+      return
+    }
+
+    try {
+      const result = await updateMyProfile({
+        telegramNumber: isOperationalStaff ? profileTelegramNumber.trim() : undefined,
+        telegramChatId: isOperationalStaff ? profileTelegramChatId.trim() : undefined,
+        audienceCode: profileAudienceCode,
+        operationalTeams: isOperationalStaff ? profileOperationalTeams : undefined,
+      })
+      if (result === null) return handleUnauthorized()
+      setProfileMessage('Profile completed. Telegram routing and dashboard access are now active.')
+      await loadAll()
+    } catch (err) {
+      setError(err.message || 'Failed to complete profile')
+    }
+  }
+
   const onLogout = async (reason = '') => {
     await logoutSession().catch(() => {})
     localStorage.removeItem('access_token')
@@ -632,6 +825,11 @@ function App() {
     setMfaSetupSecret('')
     setMfaSetupUri('')
     setMfaManageCode('')
+    setProfileTelegramNumber('')
+    setProfileTelegramChatId('')
+    setProfileAudienceCode('')
+    setProfileOperationalTeams([])
+    setProfileMessage('')
     if (reason) setAuthMessage(reason)
   }
 
@@ -1260,12 +1458,15 @@ function App() {
     }
   }
 
-  const onQuickAnalyzeAlert = async () => {
-    if (!assistantQuickAlertId) return
+  const runQuickAlertAnalysis = async (findingId, noteOverride = null) => {
+    if (!findingId) return
     setAssistantQuickBusy(true)
     setError('')
     try {
-      const result = await analyzeAssistantAlert({ findingId: Number(assistantQuickAlertId) })
+      const result = await analyzeAssistantAlert({
+        findingId: Number(findingId),
+        analystNote: noteOverride != null ? noteOverride : (assistantNote || undefined),
+      })
       if (result === null) return handleUnauthorized()
       setAssistantAlertOutput(result)
       setAssistantTicketOutput(null)
@@ -1274,6 +1475,11 @@ function App() {
     } finally {
       setAssistantQuickBusy(false)
     }
+  }
+
+  const onQuickAnalyzeAlert = async () => {
+    if (!assistantQuickAlertId) return
+    await runQuickAlertAnalysis(assistantQuickAlertId)
   }
 
   const severityRank = (severity) => {
@@ -1295,6 +1501,48 @@ function App() {
     [securityFindings],
   )
 
+  const scanRunsByAsset = useMemo(() => {
+    const grouped = {
+      application: new Map(),
+      network_device: new Map(),
+      database_asset: new Map(),
+      command_centre: [],
+    }
+
+    for (const row of scanRunRecords) {
+      const assetType = row?.assetType || 'command_centre'
+      if (assetType === 'command_centre') {
+        grouped.command_centre.push(row)
+        continue
+      }
+
+      const assetId = Number(row?.assetId)
+      if (!Number.isInteger(assetId)) continue
+      const bucket = grouped[assetType]
+      if (!(bucket instanceof Map)) continue
+      const current = bucket.get(assetId) || []
+      current.push(row)
+      bucket.set(assetId, current)
+    }
+
+    return grouped
+  }, [scanRunRecords])
+
+  const getAssetScanRuns = (assetType, assetId) => {
+    const bucket = scanRunsByAsset[assetType]
+    if (!(bucket instanceof Map)) return []
+    return bucket.get(Number(assetId)) || []
+  }
+
+  const onExportAssetScanRuns = (assetType, assetName, rows) => {
+    const safeName = String(assetName || assetType || 'asset')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'asset'
+    exportScanRunsCsv(`${safeName}-${assetType}-scan-runs.csv`, rows)
+  }
+
   const applicationTileData = useMemo(() => {
     return securityApplications.map((app) => {
       const findings = securityFindings.filter(
@@ -1305,6 +1553,10 @@ function App() {
       const highFindings = findings.filter((f) => f.severity === 'high')
       const linkedTicketIds = [...new Set(findings.map((f) => f.ticketId).filter(Boolean))]
       const linkedOpenTickets = tickets.filter((t) => linkedTicketIds.includes(t.id) && ['open', 'in_progress'].includes(t.status))
+      const runRecords = getAssetScanRuns('application', app.id)
+      const recentRunRecords = runRecords.slice(0, 6)
+      const latestRunAt = runRecords[0]?.completedAt || runRecords[0]?.startedAt || null
+      const toolCoverageCount = new Set(runRecords.map((row) => row.toolId).filter(Boolean)).size
       const riskScore = Math.min(100, (criticalFindings.length * 25) + (highFindings.length * 12) + (activeFindings.length * 8) + (app.healthStatus === 'critical' ? 18 : app.healthStatus === 'degraded' ? 9 : 0))
 
       const suggestions = []
@@ -1315,6 +1567,7 @@ function App() {
       if (activeFindings.length > 0 && linkedOpenTickets.length === 0) suggestions.push('Create and assign remediation tickets for unresolved findings to ensure tracked closure.')
       if (!app.lastActiveScanAt) suggestions.push('Run an active security scan and schedule recurring validation for this application.')
       if (!app.lastPassiveScanAt) suggestions.push('Enable passive telemetry collection to improve continuous detection coverage.')
+      if (toolCoverageCount === 0) suggestions.push('No auditable tool runs recorded yet. Validate scheduled scanning and capture the first run ledger for this application.')
       if (suggestions.length === 0) suggestions.push('Maintain current controls and continue weekly verification scans and access reviews.')
 
       return {
@@ -1327,9 +1580,13 @@ function App() {
         openLinkedTicketCount: linkedOpenTickets.length,
         riskScore,
         suggestions,
+        runRecords,
+        recentRunRecords,
+        latestRunAt,
+        toolCoverageCount,
       }
     }).sort((a, b) => b.riskScore - a.riskScore)
-  }, [securityApplications, securityFindings, tickets])
+  }, [securityApplications, securityFindings, tickets, scanRunsByAsset])
 
   const sortedNetworkDevices = useMemo(
     () => [...networkDevices].sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0)),
@@ -1496,10 +1753,283 @@ function App() {
     }
   }
 
-  const intrusionRows = useMemo(
-    () => (showAllIntrusions ? networkFindings : networkFindings.slice(0, 5)),
-    [networkFindings, showAllIntrusions],
+  const filteredNetworkFindings = useMemo(
+    () => {
+      const normalize = (value) => String(value || '').toLowerCase()
+      const talkerTokens = normalize(socSelectedTalker)
+        .split(/[^a-z0-9]+/)
+        .filter((token) => token.length >= 3)
+
+      return networkFindings.filter((finding) => {
+        if (!socSelectedTalker && !socSelectedHunt) return true
+        const corpus = normalize([
+          finding.title,
+          finding.description,
+          finding.executiveSummary,
+          finding.affectedAssetRef,
+          finding.affectedAssetType,
+          finding.application?.name,
+          finding.sourceTool,
+          finding.category,
+        ].join(' '))
+
+        const matchesTalker = talkerTokens.length === 0 || talkerTokens.some((token) => corpus.includes(token))
+        const matchesHunt = !socSelectedHunt || corpus.includes(normalize(socSelectedHunt))
+        return matchesTalker && matchesHunt
+      })
+    },
+    [networkFindings, socSelectedTalker, socSelectedHunt],
   )
+
+  const intrusionRows = useMemo(
+    () => (showAllIntrusions ? filteredNetworkFindings : filteredNetworkFindings.slice(0, 5)),
+    [filteredNetworkFindings, showAllIntrusions],
+  )
+
+  const filteredIntrusionCount = filteredNetworkFindings.length
+
+  const assistantAlertCandidates = useMemo(() => {
+    const scoped = (socSelectedTalker || socSelectedHunt) ? filteredNetworkFindings : networkFindings
+    return scoped
+      .filter((f) => ['new', 'investigating'].includes(f.status))
+      .slice(0, 8)
+  }, [socSelectedTalker, socSelectedHunt, filteredNetworkFindings, networkFindings])
+
+  const onPivotSocTalkerToNetwork = (talkerLabel) => {
+    const next = talkerLabel === socSelectedTalker ? '' : talkerLabel
+    setSocSelectedTalker(next)
+    setSocSelectedHunt('')
+    setShowAllIntrusions(true)
+    setActiveTab('network')
+  }
+
+  const onPivotSocHuntToNetwork = (huntItem) => {
+    const next = huntItem === socSelectedHunt ? '' : huntItem
+    setSocSelectedHunt(next)
+    setSocSelectedTalker('')
+    setShowAllIntrusions(true)
+    setActiveTab('network')
+  }
+
+  const clearSocDrillDown = () => {
+    setSocSelectedTalker('')
+    setSocSelectedHunt('')
+  }
+
+  const onJumpToNetworkFinding = (findingId) => {
+    if (!findingId) return
+    setShowAllIntrusions(true)
+    setSocSelectedTalker('')
+    setSocSelectedHunt('')
+    setHighlightedFindingId(Number(findingId))
+    setActiveTab('network')
+  }
+
+  const toggleSocKpiCardFlip = (cardId) => {
+    setFlippedSocKpiCards((current) => ({ ...current, [cardId]: !current[cardId] }))
+  }
+
+  const onOpenAssistantFromSocDrillDown = async () => {
+    const candidate = filteredNetworkFindings[0]
+    if (!candidate) return
+    const contextNote = `SOC drill-down context: ${socSelectedTalker || socSelectedHunt || 'network investigation'}`
+    setAssistantQuickAlertId(String(candidate.id))
+    setAssistantNote((prev) => prev || contextNote)
+    setAssistantSidecarOpen(true)
+    setActiveTab('assistant')
+
+    if (socAutoAnalyzeOnPivot) {
+      await runQuickAlertAnalysis(candidate.id, contextNote)
+    }
+  }
+
+  useEffect(() => {
+    if (!socSelectedTalker && !socSelectedHunt) return
+    if (assistantAlertCandidates.length === 0) {
+      setAssistantQuickAlertId('')
+      return
+    }
+
+    const selectedStillVisible = assistantAlertCandidates.some((finding) => String(finding.id) === String(assistantQuickAlertId || ''))
+    if (!selectedStillVisible) {
+      setAssistantQuickAlertId(String(assistantAlertCandidates[0].id))
+    }
+  }, [socSelectedTalker, socSelectedHunt, assistantAlertCandidates, assistantQuickAlertId])
+
+  const toggleNetworkCardFlip = (cardId) => {
+    setFlippedNetworkCards((current) => ({ ...current, [cardId]: !current[cardId] }))
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'network' || !highlightedFindingId) return
+
+    const targetId = `finding-row-${highlightedFindingId}`
+    const scrollTimer = setTimeout(() => {
+      const row = document.getElementById(targetId)
+      if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+
+    const clearTimer = setTimeout(() => setHighlightedFindingId(null), 4500)
+
+    return () => {
+      clearTimeout(scrollTimer)
+      clearTimeout(clearTimer)
+    }
+  }, [activeTab, highlightedFindingId, intrusionRows])
+
+  const networkInventoryTiles = useMemo(() => {
+    const inventory = networkVisibilityOverview?.inventory || {}
+    const sensors = networkVisibilityOverview?.sensors || []
+    const onlineSensors = sensors.filter((sensor) => sensor?.status === 'online').length
+    const totalSensors = sensors.length
+    const topTalkers = networkVisibilityOverview?.trafficAnalytics?.topTalkers || []
+    const topTalkerLabel = topTalkers[0]?.label || 'No active top talkers'
+    const activeThreats = networkVisibilityOverview?.summary?.activeThreats || 0
+
+    return [
+      {
+        id: 'routers',
+        label: 'Routers',
+        value: inventory.routers || 0,
+        detail: `Sensor coverage: ${onlineSensors}/${totalSensors || 0}`,
+      },
+      {
+        id: 'accessPoints',
+        label: 'Access Points',
+        value: inventory.accessPoints || 0,
+        detail: `Wireless anomaly pressure: ${networkVisibilityOverview?.trafficAnalytics?.externalExposureSignals || 0}`,
+      },
+      {
+        id: 'endpoints',
+        label: 'Endpoints',
+        value: inventory.endpoints || 0,
+        detail: `Most active segment: ${topTalkerLabel}`,
+      },
+      {
+        id: 'unknownDevices',
+        label: 'Unknown Devices',
+        value: inventory.unknownDevices || 0,
+        detail: `${networkFindings.length} unresolved network findings`,
+      },
+      {
+        id: 'offlineDevices',
+        label: 'Offline Devices',
+        value: inventory.offlineDevices || 0,
+        detail: `${Math.max(totalSensors - onlineSensors, 0)} sensors need review`,
+      },
+      {
+        id: 'activeThreats',
+        label: 'Active Threats',
+        value: activeThreats,
+        detail: `${networkVisibilityOverview?.summary?.criticalThreats || 0} critical threat signals`,
+      },
+    ]
+  }, [networkVisibilityOverview, networkFindings.length])
+
+  const socKpiFlipTiles = useMemo(() => {
+    const findings = Array.isArray(networkFindings) ? networkFindings : []
+    const active = findings.filter((finding) => ['new', 'investigating'].includes(finding.status))
+
+    const asCorpus = (finding) => String([
+      finding.title,
+      finding.description,
+      finding.executiveSummary,
+      finding.affectedAssetRef,
+      finding.affectedAssetType,
+      finding.category,
+    ].join(' ')).toLowerCase()
+
+    const eastWestRelated = active.filter((finding) => /(east[-\s]?west|lateral|internal movement|inter[-\s]?segment|segment traversal|smb|rdp|pivot)/i.test(asCorpus(finding)))
+    const externalRelated = active.filter((finding) => /(external|internet|public|edge|dmz|exposure|ingress|egress|remote access|vpn|c2|command and control)/i.test(asCorpus(finding)))
+    const criticalRelated = active.filter((finding) => String(finding.severity || '').toLowerCase() === 'critical')
+
+    const listThreats = (rows) => rows.slice(0, 3).map((finding) => {
+      const severity = String(finding.severity || 'unknown').toUpperCase()
+      return {
+        id: finding.id,
+        label: `#${finding.id} ${severity} - ${finding.title || 'Unnamed finding'}`,
+      }
+    })
+
+    const fallbackThreat = [{ id: null, label: 'No matching active threats currently in this metric.' }]
+
+    return [
+      {
+        id: 'east-west',
+        title: 'East-West Anomalies',
+        value: networkVisibilityOverview?.trafficAnalytics?.eastWestAnomalies || 0,
+        threats: listThreats(eastWestRelated).length ? listThreats(eastWestRelated) : fallbackThreat,
+        fixes: [
+          'Segment east-west traffic using micro-segmentation and strict ACL policies.',
+          'Block lateral movement paths (RDP/SMB/admin shares) for non-approved hosts.',
+          'Isolate compromised hosts and create incident tickets for each anomaly cluster.',
+        ],
+      },
+      {
+        id: 'external-exposure',
+        title: 'External Exposure Signals',
+        value: networkVisibilityOverview?.trafficAnalytics?.externalExposureSignals || 0,
+        threats: listThreats(externalRelated).length ? listThreats(externalRelated) : fallbackThreat,
+        fixes: [
+          'Close unnecessary public ports and enforce deny-by-default ingress rules.',
+          'Harden edge gateways and require MFA for all remote access paths.',
+          'Patch internet-facing systems and run immediate revalidation scans.',
+        ],
+      },
+      {
+        id: 'active-threats',
+        title: 'Active Threats',
+        value: networkVisibilityOverview?.summary?.activeThreats || 0,
+        threats: listThreats(active).length ? listThreats(active) : fallbackThreat,
+        fixes: [
+          'Assign each active threat to an owner and track remediation in tickets.',
+          'Prioritize containment for critical/high alerts before deep forensic analysis.',
+          'Validate closure by rescanning and confirming alert status transitions.',
+        ],
+      },
+      {
+        id: 'critical-threats',
+        title: 'Critical Threat Signals',
+        value: networkVisibilityOverview?.summary?.criticalThreats || 0,
+        threats: listThreats(criticalRelated).length ? listThreats(criticalRelated) : fallbackThreat,
+        fixes: [
+          'Trigger critical-response playbook and escalate to command leadership immediately.',
+          'Contain impacted assets and preserve forensic artifacts before remediation changes.',
+          'Execute emergency hardening and verify risk reduction with follow-up checks.',
+        ],
+      },
+    ]
+  }, [networkVisibilityOverview, networkFindings])
+
+  const socToolingRows = useMemo(() => {
+    const tooling = Array.isArray(fortressPosture?.securityTooling) ? fortressPosture.securityTooling : []
+    const schedByToolId = {}
+    if (Array.isArray(socSchedulerState)) {
+      for (const s of socSchedulerState) { if (s.id) schedByToolId[s.id] = s }
+    }
+    return tooling.map((tool, index) => {
+      const sched = schedByToolId[tool.id] || {}
+      return {
+        id: tool.id || `${tool.engine || 'tool'}-${tool.tool || index}`,
+        engine: tool.engine || 'Open Source',
+        tool: tool.tool || 'Security Sensor',
+        mode: String(tool.mode || 'passive').toUpperCase(),
+        fidelityLevel: tool.fidelityLevel || 'simulated',
+        cadenceMinutes: tool.cadenceMinutes || sched.cadenceMinutes || null,
+        status: String(tool.status || 'offline').toUpperCase(),
+        protectsCommandCentre: tool.protectsCommandCentre !== false,
+        detail: tool.detail || 'No telemetry detail provided',
+        protectedAssets: tool.protectedAssetCoverage?.protectedAssets ?? 0,
+        totalAssets: tool.protectedAssetCoverage?.totalAssets ?? 0,
+        auditableRunsCount: tool.auditableRunsCount ?? 0,
+        latestRunAt: tool.latestRunAt || tool.lastSeenAt || null,
+        successCount: sched.successCount || 0,
+        failureCount: sched.failureCount || 0,
+        lastSuccessAt: sched.lastSuccessAt || null,
+        lastFailureAt: sched.lastFailureAt || null,
+      }
+    })
+  }, [fortressPosture, socSchedulerState])
 
   const dataQuality = useMemo(() => {
     const sensors = networkVisibilityOverview?.sensors || []
@@ -1580,13 +2110,6 @@ function App() {
     [tickets],
   )
 
-  const highPriorityAlerts = useMemo(
-    () => networkFindings
-      .filter((f) => ['new', 'investigating'].includes(f.status))
-      .slice(0, 8),
-    [networkFindings],
-  )
-
   const criticalAlertCount = useMemo(
     () => securityFindings.filter((f) => f.severity === 'critical' && ['new', 'investigating'].includes(f.status)).length,
     [securityFindings],
@@ -1618,21 +2141,7 @@ function App() {
     [sortedDatabaseAssets, healthViewFilter],
   )
 
-  useEffect(() => {
-    if (previousCriticalCountRef.current === null) {
-      previousCriticalCountRef.current = criticalAlertCount
-      return
-    }
 
-    if (criticalAlertCount > previousCriticalCountRef.current) {
-      setCriticalPulse(true)
-      const timer = setTimeout(() => setCriticalPulse(false), 900)
-      previousCriticalCountRef.current = criticalAlertCount
-      return () => clearTimeout(timer)
-    }
-
-    previousCriticalCountRef.current = criticalAlertCount
-  }, [criticalAlertCount])
 
   const openActionItems = ticketActionItems.filter((item) => item.status !== 'done')
 
@@ -1693,13 +2202,14 @@ function App() {
   }, [auditLogs])
 
   const tabs = useMemo(() => {
-    if (isAdmin) {
+    if (canViewGovernance) {
       return [
         ['board-snapshot', 'Command Centre'],
         ['health', 'Health Check'],
         ['applications', 'Applications Monitored'],
         ['threat-intel', 'Threat Intel API'],
         ['network', 'Network Monitored'],
+        ['soc', 'SOC Dashboard'],
         ['connected-devices', 'Connected Devices'],
         ['database-monitor', 'Database Infra Monitor'],
         ['patch-management', 'Patch Management'],
@@ -1709,15 +2219,18 @@ function App() {
       ]
     }
 
-    return [
+    const staffScopedTabs = [
       ['health', 'Health Check'],
-      ['applications', 'Applications Monitored'],
-      ['network', 'Network Monitored'],
-      ['connected-devices', 'Connected Devices'],
-      ['database-monitor', 'Database Infra Monitor'],
+      canAccessApplications ? ['applications', 'Applications Monitored'] : null,
+      canAccessNetworkMonitor ? ['network', 'Network Monitored'] : null,
+      canAccessNetworkMonitor ? ['soc', 'SOC Dashboard'] : null,
+      canAccessConnectedDevices ? ['connected-devices', 'Connected Devices'] : null,
+      canAccessDatabaseMonitor ? ['database-monitor', 'Database Infra Monitor'] : null,
       ['patch-management', 'Patch Management'],
     ]
-  }, [isAdmin])
+
+    return staffScopedTabs.filter(Boolean)
+  }, [canViewGovernance, isAdmin, canAccessApplications, canAccessNetworkMonitor, canAccessConnectedDevices, canAccessDatabaseMonitor])
 
   const allowedTabIds = useMemo(() => {
     const ids = tabs.map(([id]) => id)
@@ -1737,6 +2250,7 @@ function App() {
     applications: 'Each application tile combines risk and ownership. Prioritize unresolved high-risk apps and assign owners if missing.',
     'threat-intel': 'This view highlights probable attacker behavior and hunt opportunities. Start with highest opportunity score.',
     network: 'Network view explains sensor coverage, active threats, and per-application network signals.',
+    soc: 'SOC dashboard centralizes traffic analytics, hunt priorities, and Fortress-integrated open-source defensive tooling.',
     'connected-devices': 'Use this for infrastructure hygiene. Register devices, run scans, and watch risk drift over time.',
     'database-monitor': 'Track database security posture, patch state, and crypto controls. Work top-down by risk.',
     'patch-management': 'Track planned, active, and completed patch operations by asset class with clear ownership and due dates.',
@@ -1746,32 +2260,11 @@ function App() {
     assistant: 'AI Assistant helps triage and analysis. Use it to accelerate assigned incident handling.',
   }), [])
 
-  const moveSituationToCorner = (corner) => {
-    const width = window.innerWidth <= 1100 ? 260 : 280
-    const height = window.innerWidth <= 1100 ? 140 : 120
-    const leftX = 8
-    const rightX = Math.max(8, window.innerWidth - width - 8)
-    const topY = 8
-    const bottomY = Math.max(8, window.innerHeight - height - 8)
 
-    if (corner === 'top-left') {
-      setSituationPosition({ x: leftX, y: topY })
-      return
-    }
-    if (corner === 'top-right') {
-      setSituationPosition({ x: rightX, y: topY })
-      return
-    }
-    if (corner === 'bottom-left') {
-      setSituationPosition({ x: leftX, y: bottomY })
-      return
-    }
-    setSituationPosition({ x: rightX, y: bottomY })
-  }
 
   return (
     <div className={`app-shell ${!isLoggedIn ? 'no-sidebar' : ''}`}>
-      {isLoggedIn && (
+      {isLoggedIn && !currentUser?.profileCompletionRequired && (
         <aside className="sidebar">
           <h1 className="brand">Cybersecurity Command Centre Dashboad</h1>
           <nav>
@@ -1792,7 +2285,7 @@ function App() {
       )}
 
       <main className={`workspace ${assistantSidecarOpen ? 'workspace-with-sidecar' : ''} ${!isLoggedIn ? 'workspace-login' : ''}`}>
-        {isLoggedIn && (
+        {isLoggedIn && !currentUser?.profileCompletionRequired && (
           <nav className="top-nav-bar">
             <div className="top-nav-left">
               {isAdmin && (
@@ -1809,22 +2302,26 @@ function App() {
                 title="Settings"
                 onClick={() => setSettingsPanelOpen(!settingsPanelOpen)}
               >
-                ⚙️
+                Settings
               </button>
-              <button
-                className="top-nav-icon audit-icon"
-                title="Audit Logs"
-                onClick={() => setAuditPanelOpen(!auditPanelOpen)}
-              >
-                📋
-              </button>
-              <button
-                className="top-nav-icon fortress-icon"
-                title="Fortress Dashboard"
-                onClick={() => setFortressPanelOpen(!fortressPanelOpen)}
-              >
-                🛡️
-              </button>
+              {canViewGovernance && (
+                <button
+                  className="top-nav-icon audit-icon"
+                  title="Audit Logs"
+                  onClick={() => setAuditPanelOpen(!auditPanelOpen)}
+                >
+                  Audit
+                </button>
+              )}
+              {canViewGovernance && (
+                <button
+                  className="top-nav-icon fortress-icon"
+                  title="Fortress Dashboard"
+                  onClick={() => setFortressPanelOpen(!fortressPanelOpen)}
+                >
+                  Fortress
+                </button>
+              )}
               <button
                 className="top-nav-link logout-top-btn"
                 title="Sign out"
@@ -1867,41 +2364,47 @@ function App() {
           onDisableMfa={onDisableMfa}
         />
 
-        <AuditPanel
-          isOpen={auditPanelOpen}
-          onClose={() => setAuditPanelOpen(false)}
-          logs={Array.isArray(auditLogs) ? auditLogs.slice(0, 100) : []}
-          filterCategory={auditLogFilter}
-          onFilterChange={setAuditLogFilter}
-          searchTerm={auditLogSearchTerm}
-          onSearchChange={setAuditLogSearchTerm}
-          isLoggedIn={isLoggedIn}
-        />
+        {canViewGovernance && (
+          <AuditPanel
+            isOpen={auditPanelOpen}
+            onClose={() => setAuditPanelOpen(false)}
+            logs={Array.isArray(auditLogs) ? auditLogs.slice(0, 100) : []}
+            filterCategory={auditLogFilter}
+            onFilterChange={setAuditLogFilter}
+            searchTerm={auditLogSearchTerm}
+            onSearchChange={setAuditLogSearchTerm}
+            isLoggedIn={isLoggedIn}
+            workforceTelemetry={workforceTelemetry}
+            notificationLedger={notificationLedger}
+          />
+        )}
 
-        <FortressPanel
-          isOpen={fortressPanelOpen}
-          onClose={() => setFortressPanelOpen(false)}
-          isLoggedIn={isLoggedIn}
-          lastRefreshAt={lastRefreshAt}
-          fortressPosture={fortressPosture}
-          securitySummary={securitySummary}
-          executiveImpact={executiveImpact}
-          threatIntelOverview={threatIntelOverview}
-          networkVisibilityOverview={networkVisibilityOverview}
-          patchOverview={patchOverview}
-          securityFindings={Array.isArray(securityFindings) ? securityFindings : []}
-          networkDevices={Array.isArray(networkDevices) ? networkDevices : []}
-          databaseOverview={databaseOverview}
-          onRunPassiveScan={() => onRunScan('passive')}
-          onRunActiveScan={() => onRunScan('active')}
-          onRunRecoveryDrill={onRunFortressRecoveryDrill}
-          isPassiveScanBusy={isActionBusy('scan-passive')}
-          isActiveScanBusy={isActionBusy('scan-active')}
-          isRecoveryDrillBusy={isActionBusy('fortress-recovery-drill')}
-          onUpdatePatchStatus={onUpdatePatchStatus}
-          patchActionId={patchActionId}
-          recoveryDrillResult={fortressDrillResult}
-        />
+        {canViewGovernance && (
+          <FortressPanel
+            isOpen={fortressPanelOpen}
+            onClose={() => setFortressPanelOpen(false)}
+            isLoggedIn={isLoggedIn}
+            lastRefreshAt={lastRefreshAt}
+            fortressPosture={fortressPosture}
+            securitySummary={securitySummary}
+            executiveImpact={executiveImpact}
+            threatIntelOverview={threatIntelOverview}
+            networkVisibilityOverview={networkVisibilityOverview}
+            patchOverview={patchOverview}
+            securityFindings={Array.isArray(securityFindings) ? securityFindings : []}
+            networkDevices={Array.isArray(networkDevices) ? networkDevices : []}
+            databaseOverview={databaseOverview}
+            onRunPassiveScan={() => onRunScan('passive')}
+            onRunActiveScan={() => onRunScan('active')}
+            onRunRecoveryDrill={onRunFortressRecoveryDrill}
+            isPassiveScanBusy={isActionBusy('scan-passive')}
+            isActiveScanBusy={isActionBusy('scan-active')}
+            isRecoveryDrillBusy={isActionBusy('fortress-recovery-drill')}
+            onUpdatePatchStatus={onUpdatePatchStatus}
+            patchActionId={patchActionId}
+            recoveryDrillResult={fortressDrillResult}
+          />
+        )}
 
         {error && <div className="error-banner">{error}</div>}
         {hasBusyActions && (
@@ -1968,6 +2471,45 @@ function App() {
                 <FieldWithHint help={`Email is mandatory and must use the ${NHNE_EMAIL_DOMAIN} domain.`}>
                   <input type="email" value={registerEmail} placeholder={`Email (${NHNE_EMAIL_DOMAIN})`} onChange={(e) => setRegisterEmail(e.target.value)} required />
                 </FieldWithHint>
+                <FieldWithHint help="Choose the audience role that will shape your future dashboard and reporting view.">
+                  <div className="selection-card-grid">
+                    {AUDIENCE_CODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.code}
+                        type="button"
+                        className={`selection-card ${registerAudienceCode === option.code ? 'selected' : ''}`}
+                        onClick={() => setRegisterAudienceCode(option.code)}
+                      >
+                        <strong>{option.label}</strong>
+                        <span>{option.code}</span>
+                      </button>
+                    ))}
+                  </div>
+                </FieldWithHint>
+                {registerAudienceCode === 'STAFF' && (
+                  <>
+                    <FieldWithHint help="Choose one or two operational teams for alert and assignment routing.">
+                      <div className="selection-pill-row">
+                        {OPERATIONAL_TEAM_OPTIONS.map((team) => (
+                          <button
+                            key={team}
+                            type="button"
+                            className={`selection-pill ${registerOperationalTeams.includes(team) ? 'selected' : ''}`}
+                            onClick={() => toggleTeamSelection(setRegisterOperationalTeams, team)}
+                          >
+                            {team}
+                          </button>
+                        ))}
+                      </div>
+                    </FieldWithHint>
+                    <FieldWithHint help="Enter your Telegram phone number for CCC contact records.">
+                      <input value={registerTelegramNumber} placeholder="Telegram Phone Number" onChange={(e) => setRegisterTelegramNumber(e.target.value)} required />
+                    </FieldWithHint>
+                    <FieldWithHint help="Enter the Telegram chat ID that should receive your alerts and ticket assignments.">
+                      <input value={registerTelegramChatId} placeholder="Telegram Chat ID" onChange={(e) => setRegisterTelegramChatId(e.target.value)} required />
+                    </FieldWithHint>
+                  </>
+                )}
                 <FieldWithHint help="Password must be at least 12 characters and include uppercase, lowercase, number, and special character.">
                   <input type="password" value={registerPassword} placeholder="Password" onChange={(e) => setRegisterPassword(e.target.value)} required />
                 </FieldWithHint>
@@ -2033,6 +2575,60 @@ function App() {
               </form>
             )}
           </div>
+        ) : currentUser?.profileCompletionRequired ? (
+          <div className="login-shell">
+            <div className="login-welcome">
+              <h1 className="login-title">Complete Your Profile</h1>
+              <p className="login-subtitle">Telegram routing and dashboard access stay locked until this is finished.</p>
+              {profileMessage && <div className="auth-success">{profileMessage}</div>}
+            </div>
+            <form onSubmit={onCompleteProfile} className="ticket-form ticket-form-login">
+              <h2>CCC Profile Completion</h2>
+              <FieldWithHint help="Choose the audience role that matches your reporting view.">
+                <div className="selection-card-grid">
+                  {AUDIENCE_CODE_OPTIONS.map((option) => (
+                    <button
+                      key={option.code}
+                      type="button"
+                      className={`selection-card ${profileAudienceCode === option.code ? 'selected' : ''}`}
+                      onClick={() => setProfileAudienceCode(option.code)}
+                    >
+                      <strong>{option.label}</strong>
+                      <span>{option.code}</span>
+                    </button>
+                  ))}
+                </div>
+              </FieldWithHint>
+              {profileAudienceCode === 'STAFF' && (
+                <>
+                  <FieldWithHint help="Choose one or two operational teams for incident routing.">
+                    <div className="selection-pill-row">
+                      {OPERATIONAL_TEAM_OPTIONS.map((team) => (
+                        <button
+                          key={team}
+                          type="button"
+                          className={`selection-pill ${profileOperationalTeams.includes(team) ? 'selected' : ''}`}
+                          onClick={() => toggleTeamSelection(setProfileOperationalTeams, team)}
+                        >
+                          {team}
+                        </button>
+                      ))}
+                    </div>
+                  </FieldWithHint>
+                  <FieldWithHint help="Confirm the Telegram phone number used for CCC contact records.">
+                    <input value={profileTelegramNumber} placeholder="Telegram Phone Number" onChange={(e) => setProfileTelegramNumber(e.target.value)} required />
+                  </FieldWithHint>
+                  <FieldWithHint help="Enter the Telegram chat ID that should receive your alerts and assignments.">
+                    <input value={profileTelegramChatId} placeholder="Telegram Chat ID" onChange={(e) => setProfileTelegramChatId(e.target.value)} required />
+                  </FieldWithHint>
+                </>
+              )}
+              <button type="submit">Complete Profile</button>
+              <div className="auth-links">
+                <button type="button" className="text-btn" onClick={() => onLogout('Sign in again once you are ready to complete your profile.')}>Sign Out</button>
+              </div>
+            </form>
+          </div>
         ) : (
           <>
             <button className="ai-sidecar-launcher" onClick={() => setAssistantSidecarOpen((prev) => !prev)}>
@@ -2081,9 +2677,12 @@ function App() {
 
               <div className="ai-sidecar-section">
                 <strong>Quick Alert Analysis</strong>
+                {(socSelectedTalker || socSelectedHunt) && (
+                  <p className="health-label">Scoped by SOC drill-down ({assistantAlertCandidates.length} alert candidates).</p>
+                )}
                 <select value={assistantQuickAlertId} onChange={(e) => setAssistantQuickAlertId(e.target.value)}>
                   <option value="">Select active alert</option>
-                  {highPriorityAlerts.map((alert) => (
+                  {assistantAlertCandidates.map((alert) => (
                     <option key={alert.id} value={alert.id}>#{alert.id} [{alert.severity}] {alert.title.slice(0, 45)}</option>
                   ))}
                 </select>
@@ -2124,24 +2723,7 @@ function App() {
               </div>
             </aside>
 
-            <SituationTile
-              position={situationPosition}
-              onPositionChange={setSituationPosition}
-              isDragging={isDraggingSituation}
-              onDraggingChange={setIsDraggingSituation}
-              expanded={situationExpanded}
-              onExpandChange={setSituationExpanded}
-              criticalCount={criticalAlertCount}
-              highCount={highAlertCount}
-              topAction={topPriorityAction}
-              lastUpdated={lastRefreshAt}
-              criticalPulse={criticalPulse}
-              snapToCorner={snapSituationToCorner}
-              onSnapToggle={setSnapSituationToCorner}
-              onMoveTo={moveSituationToCorner}
-              presentationMode={presentationMode}
-              onPresentationModeChange={setPresentationMode}
-            />
+
 
             {tabHelp[activeTab] && <p className="onboarding-hint">{tabHelp[activeTab]}</p>}
 
@@ -2391,8 +2973,26 @@ function App() {
 
                       <div className="application-analytics-meta">
                         <p>Owner: {tile.app.ownerEmail || 'Not assigned'}</p>
-                        <p>Passive scan: {tile.app.lastPassiveScanAt ? new Date(tile.app.lastPassiveScanAt).toLocaleString() : 'Not run yet'}</p>
-                        <p>Active scan: {tile.app.lastActiveScanAt ? new Date(tile.app.lastActiveScanAt).toLocaleString() : 'Not run yet'}</p>
+                        <p>Passive scan: {formatDateTime(tile.app.lastPassiveScanAt)}</p>
+                        <p>Active scan: {formatDateTime(tile.app.lastActiveScanAt)}</p>
+                        <p>Auditable tool coverage: {tile.toolCoverageCount} tools | Latest run: {formatDateTime(tile.latestRunAt)}</p>
+                      </div>
+
+                      <div className="asset-run-ledger">
+                        <div className="asset-run-ledger-header">
+                          <h4>Tool Run Ledger</h4>
+                          <button className="ghost-btn tiny-btn" onClick={() => onExportAssetScanRuns('application', tile.app.name, tile.runRecords)} disabled={tile.runRecords.length === 0}>Export CSV</button>
+                        </div>
+                        <ul className="asset-run-ledger-list">
+                          {tile.recentRunRecords.map((run) => (
+                            <li key={`application-run-${run.id}`}>
+                              <strong>{run.toolName}</strong>
+                              <span>{String(run.mode || 'passive').toUpperCase()} | {String(run.status || 'completed').toUpperCase()} | {formatDateTime(run.completedAt || run.startedAt)}</span>
+                              <span>{run.findingsCount ?? 0} detections | {run.detail}</span>
+                            </li>
+                          ))}
+                          {tile.recentRunRecords.length === 0 && <li>No auditable tool runs recorded yet for this application.</li>}
+                        </ul>
                       </div>
 
                       <div className="application-analytics-suggestions">
@@ -2419,13 +3019,29 @@ function App() {
               <section className="panel">
                 <h2>Network Monitored</h2>
                 <p className="onboarding-hint">How to read this: start with active threats and sensor health, then investigate top signals and assign ownership.</p>
-                <div className="network-summary-grid">
-                  <article className="stat-card"><p>Routers</p><strong>{networkVisibilityOverview?.inventory?.routers || 0}</strong></article>
-                  <article className="stat-card"><p>Access Points</p><strong>{networkVisibilityOverview?.inventory?.accessPoints || 0}</strong></article>
-                  <article className="stat-card"><p>Endpoints</p><strong>{networkVisibilityOverview?.inventory?.endpoints || 0}</strong></article>
-                  <article className="stat-card"><p>Unknown Devices</p><strong>{networkVisibilityOverview?.inventory?.unknownDevices || 0}</strong></article>
-                  <article className="stat-card"><p>Offline Devices</p><strong>{networkVisibilityOverview?.inventory?.offlineDevices || 0}</strong></article>
-                  <article className="stat-card"><p>Active Threats</p><strong>{networkVisibilityOverview?.summary?.activeThreats || 0}</strong></article>
+                <div className="network-flip-grid">
+                  {networkInventoryTiles.map((tile) => {
+                    const isFlipped = Boolean(flippedNetworkCards[tile.id])
+                    return (
+                      <article key={tile.id} className={`network-flip-card flip-card-standard ${isFlipped ? 'is-flipped' : ''}`}>
+                        <div className="network-flip-inner flip-card-inner">
+                          <div className="network-flip-face flip-card-face flip-card-front network-flip-front">
+                            <p>{tile.label}</p>
+                            <strong>{tile.value}</strong>
+                            <span className="network-flip-meta">Tap for SOC context</span>
+                          </div>
+                          <div className="network-flip-face flip-card-face flip-card-back network-flip-back">
+                            <h4>{tile.label}</h4>
+                            <p>{tile.detail}</p>
+                            <button className="flip-toggle-btn" onClick={() => toggleNetworkCardFlip(tile.id)}>Back</button>
+                          </div>
+                        </div>
+                        <button className="flip-toggle-btn" onClick={() => toggleNetworkCardFlip(tile.id)}>
+                          {isFlipped ? 'Show Count' : 'Show Detail'}
+                        </button>
+                      </article>
+                    )
+                  })}
                 </div>
 
                 {presentationMode === 'analyst' && (
@@ -2446,26 +3062,6 @@ function App() {
                     </div>
                   </>
                 )}
-
-                <h3>Traffic Analytics</h3>
-                <div className="network-traffic-grid">
-                  <article className="network-traffic-card">
-                    <p>East-West Anomalies</p>
-                    <strong>{networkVisibilityOverview?.trafficAnalytics?.eastWestAnomalies || 0}</strong>
-                  </article>
-                  <article className="network-traffic-card">
-                    <p>External Exposure Signals</p>
-                    <strong>{networkVisibilityOverview?.trafficAnalytics?.externalExposureSignals || 0}</strong>
-                  </article>
-                  <article className="network-traffic-card network-top-talkers">
-                    <p>Top Talkers</p>
-                    <ul>
-                      {(networkVisibilityOverview?.trafficAnalytics?.topTalkers || []).map((talker) => (
-                        <li key={talker.label}><span>{talker.label}</span><strong>{talker.trafficIndex}</strong></li>
-                      ))}
-                    </ul>
-                  </article>
-                </div>
 
                 <h3>Per-Application Network Visibility</h3>
                 <div className="network-app-grid">
@@ -2506,14 +3102,33 @@ function App() {
                   ))}
                 </div>
 
-                <h3>Threat Hunting Playbook</h3>
-                <ul className="network-hunt-list">
-                  {(networkVisibilityOverview?.huntRecommendations || []).map((item, idx) => (
-                    <li key={`hunt-${idx}`}>{item}</li>
-                  ))}
-                </ul>
-
                 <h3>Potential Attacks Detected</h3>
+                {(socSelectedTalker || socSelectedHunt) && (
+                  <div className="onboarding-hint soc-drilldown-banner">
+                    <span>
+                      SOC Drill-down active:
+                      {socSelectedTalker ? ` top talker "${socSelectedTalker}"` : ''}
+                      {socSelectedHunt ? ` hunt "${socSelectedHunt}"` : ''}
+                      {` | ${filteredIntrusionCount} matching alerts`}
+                    </span>
+                    <div className="soc-drilldown-actions">
+                      <button
+                        className={`ghost-btn tiny-btn ${socAutoAnalyzeOnPivot ? 'active-toggle' : ''}`}
+                        onClick={() => setSocAutoAnalyzeOnPivot((prev) => !prev)}
+                      >
+                        {socAutoAnalyzeOnPivot ? 'Mode: Prefill + Run' : 'Mode: Prefill Only'}
+                      </button>
+                      <button
+                        className="ghost-btn tiny-btn"
+                        onClick={onOpenAssistantFromSocDrillDown}
+                        disabled={filteredIntrusionCount === 0 || assistantQuickBusy}
+                      >
+                        {socAutoAnalyzeOnPivot ? 'Send To AI + Run' : 'Send To AI'}
+                      </button>
+                      <button className="ghost-btn tiny-btn" onClick={clearSocDrillDown}>Clear Drill-down</button>
+                    </div>
+                  </div>
+                )}
                 <div className="table-wrap">
                   <table className="ticket-table">
                     <thead>
@@ -2521,7 +3136,7 @@ function App() {
                     </thead>
                     <tbody>
                       {intrusionRows.map((finding) => (
-                        <tr key={finding.id}>
+                        <tr id={`finding-row-${finding.id}`} key={finding.id} className={highlightedFindingId === finding.id ? 'network-finding-row-target' : ''}>
                           <td>{finding.id}</td>
                           <td>{finding.application?.name || 'Unknown'}</td>
                           <td>{finding.title}</td>
@@ -2562,13 +3177,13 @@ function App() {
                           </td>
                         </tr>
                       ))}
-                      {intrusionRows.length === 0 && <tr><td colSpan="6" className="empty-state">No potential attack indicators yet.</td></tr>}
+                      {intrusionRows.length === 0 && <tr><td colSpan="6" className="empty-state">No potential attack indicators match the current SOC drill-down.</td></tr>}
                     </tbody>
                   </table>
                 </div>
-                {networkFindings.length > 5 && (
+                {filteredIntrusionCount > 5 && (
                   <button className="ghost-btn" onClick={() => setShowAllIntrusions((prev) => !prev)}>
-                    {showAllIntrusions ? 'Show Top 5' : `Show All (${networkFindings.length})`}
+                    {showAllIntrusions ? 'Show Top 5' : `Show All (${filteredIntrusionCount})`}
                   </button>
                 )}
               </section>
@@ -2599,7 +3214,10 @@ function App() {
                 )}
 
                 <div className="connected-device-grid">
-                  {sortedNetworkDevices.map((device) => (
+                  {sortedNetworkDevices.map((device) => {
+                    const deviceRuns = getAssetScanRuns('network_device', device.id)
+                    const recentDeviceRuns = deviceRuns.slice(0, 4)
+                    return (
                     <article key={device.id} className="connected-device-card">
                       <div className="connected-device-header">
                         <div>
@@ -2617,10 +3235,26 @@ function App() {
                       <p className="connected-device-meta">Vendor/Model: {device.vendor || 'n/a'} {device.model || ''}</p>
                       {presentationMode === 'analyst' && (
                         <>
-                          <p className="connected-device-meta">Last passive scan: {device.lastPassiveScanAt ? new Date(device.lastPassiveScanAt).toLocaleString() : 'Not run yet'}</p>
-                          <p className="connected-device-meta">Last IDS/IPS event: {device.lastIdsIpsEventAt ? new Date(device.lastIdsIpsEventAt).toLocaleString() : 'No events yet'}</p>
+                          <p className="connected-device-meta">Last passive scan: {formatDateTime(device.lastPassiveScanAt)}</p>
+                          <p className="connected-device-meta">Last IDS/IPS event: {formatDateTime(device.lastIdsIpsEventAt)}</p>
                         </>
                       )}
+                      <div className="asset-run-ledger compact-ledger">
+                        <div className="asset-run-ledger-header">
+                          <h4>Tool Run Ledger</h4>
+                          <button className="ghost-btn tiny-btn" onClick={() => onExportAssetScanRuns('network_device', device.name, deviceRuns)} disabled={deviceRuns.length === 0}>Export CSV</button>
+                        </div>
+                        <ul className="asset-run-ledger-list">
+                          {recentDeviceRuns.map((run) => (
+                            <li key={`device-run-${run.id}`}>
+                              <strong>{run.toolName}</strong>
+                              <span>{String(run.status || 'completed').toUpperCase()} | {formatDateTime(run.completedAt || run.startedAt)}</span>
+                              <span>{run.detail}</span>
+                            </li>
+                          ))}
+                          {recentDeviceRuns.length === 0 && <li>No auditable device scan runs recorded yet.</li>}
+                        </ul>
+                      </div>
                       {isAdmin && (
                         <div className="staff-actions">
                           <button
@@ -2640,7 +3274,8 @@ function App() {
                         </div>
                       )}
                     </article>
-                  ))}
+                    )
+                  })}
                   {networkDevices.length === 0 && (
                     <article className="connected-device-card">
                       <h3>No devices registered</h3>
@@ -2651,84 +3286,311 @@ function App() {
               </section>
             )}
 
-            {activeTab === 'database-monitor' && (
-              <section className="panel">
-                <h2>Database Infrastructure Security Monitor</h2>
-                <p className="onboarding-hint">How to read this: register each critical database, run security scans, then close patch and crypto gaps from highest risk downward.</p>
-                {isAdmin && (
-                  <DatabaseRegistrationForm
-                    dbName={dbName}
-                    onDbNameChange={setDbName}
-                    dbEngine={dbEngine}
-                    onDbEngineChange={setDbEngine}
-                    dbEnvironment={dbEnvironment}
-                    onDbEnvironmentChange={setDbEnvironment}
-                    dbHost={dbHost}
-                    onDbHostChange={setDbHost}
-                    dbPort={dbPort}
-                    onDbPortChange={setDbPort}
-                    dbOwner={dbOwner}
-                    onDbOwnerChange={setDbOwner}
-                    dbCriticality={dbCriticality}
-                    onDbCriticalityChange={setDbCriticality}
-                    dbPatchLevel={dbPatchLevel}
-                    onDbPatchLevelChange={setDbPatchLevel}
-                    dbEncryptionAtRest={dbEncryptionAtRest}
-                    onDbEncryptionAtRestChange={setDbEncryptionAtRest}
-                    dbTlsInTransit={dbTlsInTransit}
-                    onDbTlsInTransitChange={setDbTlsInTransit}
-                    onSubmit={onRegisterDatabase}
-                  />
+            {activeTab === 'soc' && (
+              <section className="panel soc-command-panel">
+                <h2>SOC Command Centre</h2>
+                <p className="onboarding-hint">How to read this: monitor threat levels first, investigate top-talker segments, then execute hunt actions through Fortress-backed tooling.</p>
+
+                {/* Threat Level Status Bar */}
+                {(() => {
+                  const critCount = socLiveFeedData.filter((e) => e.severity === 'critical').length
+                  const highCount = socLiveFeedData.filter((e) => e.severity === 'high').length
+                  const level = critCount > 0 ? 'critical' : highCount > 3 ? 'high' : highCount > 0 ? 'medium' : 'low'
+                  const labels = { critical: 'CRITICAL', high: 'HIGH', medium: 'ELEVATED', low: 'NORMAL' }
+                  const last = socLiveFeedData[0]
+                  return (
+                    <div className="soc-cmd-bar">
+                      <span className={`soc-threat-level threat-${level}`}>{labels[level]}</span>
+                      <span className="soc-cmd-stat">Feed: <strong>{socLiveFeedData.length}</strong></span>
+                      <span className="soc-cmd-stat">Origins: <strong>{socThreatOrigins.length}</strong></span>
+                      <span className="soc-cmd-stat">Recon IPs: <strong>{socReconDetections.length}</strong></span>
+                      <span className="soc-cmd-stat">Fortress: <strong>{fortressPosture?.fortressScore ?? '-'}</strong></span>
+                      <span className="soc-cmd-stat">Posture: <strong>{fortressPosture?.postureBand ?? '-'}</strong></span>
+                      {last && <span className="soc-cmd-last">Last event {new Date(last.timestamp).toLocaleTimeString()}</span>}
+                    </div>
+                  )
+                })()}
+
+                {/* KPI Flip Cards */}
+                <div className="network-traffic-grid soc-kpi-grid">
+                  {socKpiFlipTiles.map((tile) => {
+                    const isFlipped = Boolean(flippedSocKpiCards[tile.id])
+                    return (
+                      <article key={tile.id} className={`network-traffic-card soc-kpi-flip-card flip-card-standard ${isFlipped ? 'is-flipped' : ''}`}>
+                        <div className="flip-card-inner">
+                          <div className="flip-card-face flip-card-front soc-kpi-front">
+                            <p>{tile.title}</p>
+                            <strong>{tile.value}</strong>
+                            <span className="network-flip-meta">Flip for threat detail</span>
+                          </div>
+                          <div className="flip-card-face flip-card-back soc-kpi-back">
+                            <h4>{tile.title}</h4>
+                            <p className="health-label">Threats detected</p>
+                            <ul>
+                              {tile.threats.map((item, idx) => (
+                                <li key={`${tile.id}-threat-${idx}`}>
+                                  {item.id ? (
+                                    <button className="soc-threat-link-btn" onClick={() => onJumpToNetworkFinding(item.id)}>{item.label}</button>
+                                  ) : (
+                                    <span>{item.label}</span>
+                                  )}
+                                </li>
+                              ))}
+                            </ul>
+                            <p className="health-label">How to fix</p>
+                            <ul>
+                              {tile.fixes.map((item, idx) => (
+                                <li key={`${tile.id}-fix-${idx}`}>{item}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        </div>
+                        <button className="flip-toggle-btn" onClick={() => toggleSocKpiCardFlip(tile.id)}>
+                          {isFlipped ? 'Show KPI' : 'Inspect Threats'}
+                        </button>
+                      </article>
+                    )
+                  })}
+                </div>
+
+                {/* Live Security Event Stream */}
+                <div className="soc-live-panel">
+                  <div className="soc-panel-header">
+                    <h2>Live Security Events</h2>
+                    <span className="soc-panel-count">{socLiveFeedData.length} events | refresh every 10s</span>
+                  </div>
+                  <div className="soc-live-feed">
+                    <div className="soc-live-column-head">
+                      <span>Severity</span>
+                      <span>Tool</span>
+                      <span>Time</span>
+                      <span>Type</span>
+                    </div>
+                    {socLiveFeedData.slice(0, socLiveFeedShowAll ? socLiveFeedData.length : 10).map((ev) => (
+                      <div key={`ev-${ev.id}`} className={`soc-event-row sev-row-${ev.severity || 'info'}`}>
+                        <div className="soc-event-main">
+                          <span className={`soc-event-sev sev-${ev.severity || 'info'}`}>{String(ev.severity || 'info').toUpperCase()}</span>
+                          <span className="soc-event-tool" title={ev.tool || 'unknown'}>{ev.tool || 'unknown'}</span>
+                          <span className="soc-event-time">{ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : 'n/a'}</span>
+                          <span className="soc-event-type">{ev.type || 'event'}</span>
+                        </div>
+                        <div className="soc-event-context">
+                          <span className="soc-event-source">{ev.srcFlag || ''} {ev.srcIp || 'unknown-src'}{ev.srcOrg ? ` (${ev.srcOrg})` : ''}</span>
+                          <span className="soc-event-target">Target {ev.dstAsset || ev.dstIp || 'unknown'}{ev.dstPort ? `:${ev.dstPort}` : ''}</span>
+                        </div>
+                        <p className="soc-event-msg">{ev.message}</p>
+                      </div>
+                    ))}
+                    {socLiveFeedData.length === 0 && (
+                      <div className="soc-feed-empty">Awaiting events from Fortress sensors...</div>
+                    )}
+                  </div>
+                  {socLiveFeedData.length > 10 && (
+                    <div className="soc-section-actions">
+                      <button className="ghost-btn tiny-btn" onClick={() => setSocLiveFeedShowAll(!socLiveFeedShowAll)}>
+                        {socLiveFeedShowAll ? 'Show Less' : `View All ${socLiveFeedData.length} Events`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Attack Origins */}
+                <div className="soc-origins-section">
+                  <div className="soc-panel-header">
+                    <h2>Attack Origins</h2>
+                    <span className="soc-panel-count">{socThreatOrigins.length} countries</span>
+                  </div>
+                  <div className="soc-structured-head soc-origin-head">
+                    <span>Where</span>
+                    <span>Location / Org</span>
+                    <span>When</span>
+                    <span>Application / Asset</span>
+                    <span>Activity</span>
+                  </div>
+                  {socThreatOrigins.slice(0, socOriginsShowAll ? socThreatOrigins.length : 10).map((o) => {
+                    const topTargets = (o.topTargets || []).slice(0, 2)
+                    const targetsLabel = topTargets.length > 0
+                      ? topTargets.map((t) => `${t.target} (${t.count})`).join(', ')
+                      : 'No target data'
+                    return (
+                      <div key={o.country} className="soc-origin-structured-row">
+                        <div className="soc-origin-where">
+                          <span className="soc-origin-flag">{o.flag}</span>
+                          <span className="soc-origin-country">{o.country}</span>
+                        </div>
+                        <div className="soc-origin-loc">
+                          <span>{o.city || 'Unknown city'}</span>
+                          <span className="soc-origin-org">{o.org || 'Unknown org'}</span>
+                        </div>
+                        <div className="soc-origin-when">{o.latestAt ? new Date(o.latestAt).toLocaleTimeString() : 'n/a'}</div>
+                        <div className="soc-origin-targets">{targetsLabel}</div>
+                        <div className="soc-origin-activity">
+                          <span className="soc-origin-count">{o.count} total</span>
+                          <span>High {o.high || 0} | Critical {o.critical || 0}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                  {socThreatOrigins.length === 0 && <p className="soc-empty-hint">Loading threat origin data...</p>}
+                  {socThreatOrigins.length > 10 && (
+                    <div className="soc-section-actions">
+                      <button className="ghost-btn tiny-btn" onClick={() => setSocOriginsShowAll(!socOriginsShowAll)}>
+                        {socOriginsShowAll ? 'Show Less' : `View All ${socThreatOrigins.length} Countries`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Reconnaissance Detections */}
+                <div className="soc-recon-section">
+                  <div className="soc-panel-header">
+                    <h2>Reconnaissance & Scanner Activity</h2>
+                    <span className="soc-panel-count">{socReconDetections.length} active IPs</span>
+                  </div>
+                  <p className="soc-section-hint">External IPs probing your infrastructure via port scans, DNS lookups, auth brute-force, and CVE signature matching.</p>
+                  <div className="soc-structured-head soc-recon-head">
+                    <span>Source</span>
+                    <span>Location / Org</span>
+                    <span>When</span>
+                    <span>Target Applications</span>
+                    <span>Activity Summary</span>
+                  </div>
+                  {socReconDetections.slice(0, socReconShowAll ? socReconDetections.length : 10).map((det) => (
+                    <div key={det.srcIp} className="soc-recon-structured-row">
+                      <div className="soc-recon-source">
+                        <span className="soc-recon-flag">{det.srcFlag}</span>
+                        <code className="soc-recon-ip">{det.srcIp}</code>
+                        <span className={`soc-threat-badge threat-type-${String(det.srcThreat || 'scanner').toLowerCase().replace(/[^a-z]/g, '')}`}>{det.srcThreat}</span>
+                      </div>
+                      <div className="soc-recon-loc">
+                        <span className="soc-recon-city">{det.srcCity}, {det.srcCountry}</span>
+                        <span className="soc-recon-org">{det.srcOrg}</span>
+                      </div>
+                      <div className="soc-recon-when">
+                        <span>First {det.firstSeen ? new Date(det.firstSeen).toLocaleTimeString() : 'n/a'}</span>
+                        <span>Last {det.lastSeen ? new Date(det.lastSeen).toLocaleTimeString() : 'n/a'}</span>
+                      </div>
+                      <div className="soc-recon-targets">{det.targetsHit.slice(0, 2).join(' | ')}{det.targetsHit.length > 2 ? ` +${det.targetsHit.length - 2} more` : ''}</div>
+                      <div className="soc-recon-badges">
+                        {det.portScans > 0 && <span className="soc-recon-badge recon-scan">Port scans {det.portScans}</span>}
+                        {det.dnsLookups > 0 && <span className="soc-recon-badge recon-dns">DNS queries {det.dnsLookups}</span>}
+                        {det.authFails > 0 && <span className="soc-recon-badge recon-auth">Auth fails {det.authFails}</span>}
+                        {det.vulnProbes > 0 && <span className="soc-recon-badge recon-vuln">CVE probes {det.vulnProbes}</span>}
+                        <span className="soc-recon-badge recon-total">Total {det.totalEvents || 0}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {socReconDetections.length === 0 && <p className="soc-empty-hint">No recon activity in current event window.</p>}
+                  {socReconDetections.length > 10 && (
+                    <div className="soc-section-actions">
+                      <button className="ghost-btn tiny-btn" onClick={() => setSocReconShowAll(!socReconShowAll)}>
+                        {socReconShowAll ? 'Show Less' : `View All ${socReconDetections.length} IPs`}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Top Talkers + Hunt */}
+                <div className="workspace-columns soc-columns">
+                  <article className="network-traffic-card network-top-talkers">
+                    <h3>Traffic Top Talkers</h3>
+                    <ul>
+                      {(networkVisibilityOverview?.trafficAnalytics?.topTalkers || []).map((talker) => (
+                        <li key={talker.label}>
+                          <button className={`soc-pivot-btn ${socSelectedTalker === talker.label ? 'active' : ''}`} onClick={() => onPivotSocTalkerToNetwork(talker.label)}>Investigate</button>
+                          <span>{talker.label}</span>
+                          <strong>{talker.trafficIndex}</strong>
+                        </li>
+                      ))}
+                      {(networkVisibilityOverview?.trafficAnalytics?.topTalkers || []).length === 0 && <li><span>No top talker data yet.</span><strong>n/a</strong></li>}
+                    </ul>
+                  </article>
+                  <article className="network-traffic-card">
+                    <h3>Hunt Recommendations</h3>
+                    <ul className="network-hunt-list soc-hunt-list">
+                      {(networkVisibilityOverview?.huntRecommendations || []).map((item, idx) => (
+                        <li key={`soc-hunt-${idx}`}>
+                          <button className={`soc-pivot-btn ${socSelectedHunt === item ? 'active' : ''}`} onClick={() => onPivotSocHuntToNetwork(item)}>Hunt</button>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                      {(networkVisibilityOverview?.huntRecommendations || []).length === 0 && <li>No hunt recommendations available yet.</li>}
+                    </ul>
+                  </article>
+                </div>
+
+                {(socSelectedTalker || socSelectedHunt) && (
+                  <div className="onboarding-hint soc-drilldown-banner">
+                    <span>
+                      SOC Drill-down active:
+                      {socSelectedTalker ? ` top talker "${socSelectedTalker}"` : ''}
+                      {socSelectedHunt ? ` hunt "${socSelectedHunt}"` : ''}
+                      {` | ${filteredIntrusionCount} matching alerts`}
+                    </span>
+                    <div className="soc-drilldown-actions">
+                      <button className={`ghost-btn tiny-btn ${socAutoAnalyzeOnPivot ? 'active-toggle' : ''}`} onClick={() => setSocAutoAnalyzeOnPivot((prev) => !prev)}>
+                        {socAutoAnalyzeOnPivot ? 'Mode: Prefill + Run' : 'Mode: Prefill Only'}
+                      </button>
+                      <button className="ghost-btn tiny-btn" onClick={onOpenAssistantFromSocDrillDown} disabled={filteredIntrusionCount === 0 || assistantQuickBusy}>
+                        {socAutoAnalyzeOnPivot ? 'Send To AI + Run' : 'Send To AI'}
+                      </button>
+                      <button className="ghost-btn tiny-btn" onClick={clearSocDrillDown}>Clear Drill-down</button>
+                    </div>
+                  </div>
                 )}
 
-                <div className="network-summary-grid">
-                  <article className="stat-card"><p>Total Databases</p><strong>{databaseOverview?.summary?.totalDatabases || 0}</strong></article>
-                  <article className="stat-card"><p>Online</p><strong>{databaseOverview?.summary?.online || 0}</strong></article>
-                  <article className="stat-card"><p>Degraded</p><strong>{databaseOverview?.summary?.degraded || 0}</strong></article>
-                  <article className="stat-card"><p>Critical Assets</p><strong>{databaseOverview?.summary?.critical || 0}</strong></article>
-                  <article className="stat-card"><p>Average Risk</p><strong>{databaseOverview?.summary?.avgRisk || 0}</strong></article>
+                {/* Fortress Tool Stack (fidelity + scheduler) */}
+                <h2>Fortress Tool Stack</h2>
+                <p className="onboarding-hint">
+                  Fidelity: <strong>native</strong> = real engine integrated &nbsp;|&nbsp;
+                  <strong>simulated</strong> = heuristic execution &nbsp;|&nbsp;
+                  <strong>heartbeat-only</strong> = telemetry ingestion only
+                </p>
+                <div className="table-wrap">
+                  <table className="ticket-table soc-tool-table">
+                    <thead>
+                      <tr>
+                        <th>Engine</th>
+                        <th>Mode</th>
+                        <th>Fidelity</th>
+                        <th>Status</th>
+                        <th>Coverage</th>
+                        <th>Cadence</th>
+                        <th>Runs</th>
+                        <th>OK / Fail</th>
+                        <th>Last Success</th>
+                        <th>Purpose</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {socToolingRows.slice(0, socToolsShowAll ? socToolingRows.length : 10).map((tool) => (
+                        <tr key={tool.id}>
+                          <td><strong>{tool.engine}</strong></td>
+                          <td><span className="soc-mode-badge">{tool.mode}</span></td>
+                          <td><span className={`soc-fidelity fidelity-${tool.fidelityLevel}`}>{tool.fidelityLevel}</span></td>
+                          <td><span className={`badge ${tool.status === 'ONLINE' ? 'badge-low' : 'badge-medium'}`}>{tool.status}</span></td>
+                          <td>{tool.protectedAssets}/{tool.totalAssets}</td>
+                          <td>{tool.cadenceMinutes ? `${tool.cadenceMinutes}m` : '-'}</td>
+                          <td>{tool.auditableRunsCount}</td>
+                          <td>
+                            <span className="soc-sched-ok">OK {tool.successCount}</span>
+                            {' / '}
+                            <span className={`soc-sched-fail ${tool.failureCount > 0 ? 'has-fails' : ''}`}>Fail {tool.failureCount}</span>
+                          </td>
+                          <td>{formatDateTime(tool.lastSuccessAt || tool.latestRunAt)}</td>
+                          <td className="soc-tool-purpose">{tool.detail}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-
-                <div className="connected-device-grid">
-                  {sortedDatabaseAssets.map((db) => (
-                    <article key={db.id} className="connected-device-card">
-                      <div className="connected-device-header">
-                        <div>
-                          <h3>{db.name}</h3>
-                          <p>{db.engine} | {db.environment}</p>
-                        </div>
-                        <span className={`health-app-status status-${db.state === 'online' ? 'healthy' : db.state === 'degraded' ? 'degraded' : 'unknown'}`}>{db.state}</span>
-                      </div>
-                      <div className="connected-device-metrics">
-                        <span>Risk <strong>{db.riskScore}</strong></span>
-                        <span>Criticality <strong>{db.criticality}</strong></span>
-                        <span>Patch <strong>{db.patchLevel || 'unknown'}</strong></span>
-                        <span>Backup <strong>{db.backupStatus}</strong></span>
-                      </div>
-                      <p className="connected-device-meta">Host: {db.host}{db.port ? `:${db.port}` : ''}</p>
-                      <p className="connected-device-meta">Owner: {db.ownerEmail || 'Not assigned'}</p>
-                      {presentationMode === 'analyst' && <p className="connected-device-meta">Crypto: At-rest {db.encryptionAtRest ? 'yes' : 'no'} | TLS {db.tlsInTransit ? 'yes' : 'no'}</p>}
-                      {isAdmin && (
-                        <div className="staff-actions">
-                          <button
-                            className={`ghost-btn tiny-btn live-btn ${isActionBusy(`db-scan-${db.id}`) ? 'is-busy' : ''}`}
-                            disabled={isActionBusy(`db-scan-${db.id}`)}
-                            onClick={() => onRunDatabaseScan(db.id)}
-                          >
-                            {isActionBusy(`db-scan-${db.id}`) ? 'Scanning...' : 'Run Security Scan'}
-                          </button>
-                        </div>
-                      )}
-                    </article>
-                  ))}
-                </div>
-
-                <h3>Patch and Hardening Recommendations</h3>
-                <ul className="network-hunt-list">
-                  {(databaseOverview?.patchRecommendations || []).map((item, idx) => (
-                    <li key={`db-reco-${idx}`}>{item}</li>
-                  ))}
-                </ul>
+                {socToolingRows.length > 10 && (
+                  <div className="soc-section-actions">
+                    <button className="ghost-btn tiny-btn" onClick={() => setSocToolsShowAll(!socToolsShowAll)}>
+                      {socToolsShowAll ? 'Show Less' : `View All ${socToolingRows.length} Tools`}
+                    </button>
+                  </div>
+                )}
               </section>
             )}
 
