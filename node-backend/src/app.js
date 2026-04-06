@@ -36,7 +36,19 @@ import reportsRouteFactory from './routes/reports.js';
 import automationRouteFactory from './routes/automation.js';
 import webhooksRouteFactory from './routes/webhooks.js';
 import { runSecuritySweep, healthSummary } from './services/securityEngine.js';
-import { buildAssignmentGuidance, buildAssignmentMessage, buildResolutionReport } from './services/ticketAssist.js';
+import { recordScanRun } from './services/scanRunLedger.js';
+import { generateAndPushEvents, pushScanToolEvent } from './services/socLiveFeed.js';
+import { recordToolSchedulerRun } from './services/toolRegistry.js';
+import { buildAssignment5W1H, buildAssignmentGuidance, buildAssignmentMessage, buildResolutionReport, detectAssignmentDomain } from './services/ticketAssist.js';
+import {
+  findingImpactedTeams,
+  getAudienceLabel,
+  getProfileCompletionState,
+  isLeadershipAudience,
+  isOperationalStaffAudience,
+  normalizeOperationalTeams,
+  readUserOperationalTeams,
+} from './services/userProfile.js';
 // Import security functions
 import { sanitizeString, validatePriority } from './security.js';
 import { Op } from 'sequelize';
@@ -55,6 +67,7 @@ const API_PERF_SAMPLE_SIZE = 200;
 const apiPerformanceMetrics = new Map();
 let isTokenRevoked = async () => false;
 let revokeTokenJti = async () => {};
+const NOTIFICATION_LEDGER_RETENTION_DAYS = Number.parseInt(CONFIG.NOTIFICATION_LEDGER_RETENTION_DAYS || '90', 10);
 const explicitCorsOrigins = CONFIG.CORS_ALLOWED_ORIGINS
   .split(',')
   .map((value) => value.trim())
@@ -133,6 +146,10 @@ function resolveTrustProxy(value) {
   const asNumber = Number(normalized);
   if (Number.isInteger(asNumber) && asNumber >= 0) return asNumber;
   return value;
+}
+
+function escapeTelegramMarkdown(value = '') {
+  return String(value).replace(/([_\*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
 // Apply security headers middleware
@@ -287,8 +304,37 @@ function roleMiddleware(requiredRole) {
   };
 }
 
+function governanceAccessMiddleware(req, res, next) {
+  const audienceCode = String(req.user?.audienceCode || '').trim().toUpperCase();
+  // Admin: full access. TJN = Command Centre Manager (Jason). GJN = Operational Manager.
+  if (req.user?.role === 'admin' || audienceCode === 'TJN' || audienceCode === 'GJN') {
+    return next();
+  }
+  return res.status(403).json({ error: 'Insufficient permissions' });
+}
+
 // In-memory storage for Telegram conversation states
 const telegramConversations = new Map();
+
+// Geo-IP cache: ip -> { geo, cachedAt }  (TTL: 1 hour per entry)
+const geoCache = new Map();
+const GEO_CACHE_TTL_MS = 60 * 60 * 1000;
+const PRIVATE_IP_RE = /^(127\.|::1$|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::ffff:127\.|::ffff:10\.|::ffff:192\.168\.)/;
+
+async function getGeoForIp(ip) {
+  if (!ip || PRIVATE_IP_RE.test(ip)) return 'Local / Private';
+  const cached = geoCache.get(ip);
+  if (cached && (Date.now() - cached.cachedAt) < GEO_CACHE_TTL_MS) return cached.geo;
+  try {
+    const r = await fetch(`http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,country`, { signal: AbortSignal.timeout(3000) });
+    const data = await r.json();
+    const geo = data.status === 'success' ? `${data.city}, ${data.country}` : null;
+    geoCache.set(ip, { geo, cachedAt: Date.now() });
+    return geo;
+  } catch {
+    return null;
+  }
+}
 
 // Main setup function (async for database initialization)
 async function setup() {
@@ -308,7 +354,9 @@ async function setup() {
     networkDeviceModel,
     databaseAssetModel,
     patchTaskModel,
+    scanRunRecordModel,
     revokedTokenModel,
+    notificationLedgerModel,
   } = await initModels();
 
   isTokenRevoked = async (jti) => {
@@ -333,6 +381,19 @@ async function setup() {
   cron.schedule('*/15 * * * *', async () => {
     try {
       await revokedTokenModel.destroy({ where: { expiresAt: { [Op.lte]: new Date() } } });
+    } catch (_err) {
+      // best effort cleanup
+    }
+  });
+
+  // Keep notification ledger bounded to avoid unbounded growth.
+  cron.schedule('15 2 * * *', async () => {
+    try {
+      const retentionDays = Number.isFinite(NOTIFICATION_LEDGER_RETENTION_DAYS) && NOTIFICATION_LEDGER_RETENTION_DAYS > 0
+        ? NOTIFICATION_LEDGER_RETENTION_DAYS
+        : 90;
+      const cutoff = new Date(Date.now() - (retentionDays * 24 * 60 * 60 * 1000));
+      await notificationLedgerModel.destroy({ where: { createdAt: { [Op.lte]: cutoff } } });
     } catch (_err) {
       // best effort cleanup
     }
@@ -380,20 +441,160 @@ async function setup() {
     return userModel.findOrCreate({ where: { telegramId: from.id }, defaults: { name: from.first_name || 'Unknown', telegramId: from.id } });
   }
 
+  function getTelegramChatId(user) {
+    return String(user?.telegramChatId || user?.telegramId || '').trim() || null;
+  }
+
+  function canReceiveTelegram(user) {
+    const profileState = getProfileCompletionState(user);
+    return Boolean(user?.notifyTelegram) && Boolean(getTelegramChatId(user)) && profileState.isComplete;
+  }
+
+  async function sendTelegramToUser(user, text, options = {}) {
+    if (!user) return false;
+
+    if (!canReceiveTelegram(user)) {
+      const status = 'not_configured';
+      await user.update({
+        lastTelegramDeliveryAt: new Date(),
+        lastTelegramDeliveryStatus: status,
+      }).catch(() => {});
+      await notificationLedgerModel.create({
+        userId: user.id,
+        channel: 'telegram',
+        subject: String(text || '').slice(0, 255),
+        status,
+        deliveredAt: null,
+        referenceType: options.referenceType || 'system',
+        referenceId: options.referenceId ? String(options.referenceId) : null,
+        errorMessage: 'Telegram not configured for this user',
+      }).catch(() => {});
+      return false;
+    }
+
+    const delivered = await sendTelegramMessage(getTelegramChatId(user), text, options);
+    const status = delivered ? 'delivered' : 'failed';
+    const deliveredAt = delivered ? new Date() : null;
+    await user.update({
+      lastTelegramDeliveryAt: new Date(),
+      lastTelegramDeliveryStatus: status,
+    }).catch(() => {});
+    await notificationLedgerModel.create({
+      userId: user.id,
+      channel: 'telegram',
+      subject: String(text || '').slice(0, 255),
+      status,
+      deliveredAt,
+      referenceType: options.referenceType || 'system',
+      referenceId: options.referenceId ? String(options.referenceId) : null,
+      errorMessage: delivered ? null : 'Telegram send failed',
+    }).catch(() => {});
+    return delivered;
+  }
+
+  function buildLeadershipAssignmentMessage(ticket, guidance, assignee) {
+    const briefing = buildAssignment5W1H(ticket, guidance, {
+      assigneeName: `${assignee?.name || ''} ${assignee?.surname || ''}`.trim() || assignee?.name || 'Assigned CCC staff member',
+      assigneeScjId: assignee?.scjId || ticket.assigneeId || null,
+      assigneeRole: assignee?.role || null,
+      impactedServices: ticket.impactedServices || null,
+      coordinator: 'Cybersecurity Command Centre',
+    });
+
+    return [
+      `5W1H Ticket Assignment Summary - #${ticket.id}`,
+      `Audience: Operational escalation leadership`,
+      `What: ${briefing.what}`,
+      `Where: ${briefing.where}`,
+      `When: ${briefing.when.assignedAt}${briefing.when.slaDueAt ? ` | SLA due ${briefing.when.slaDueAt}` : ''}`,
+      `Who: ${briefing.who.assigneeName}${briefing.who.assigneeScjId ? ` (${briefing.who.assigneeScjId})` : ''}`,
+      `Why: ${ticket.executiveSummary || guidance.issueSummary}`,
+      `How: ${guidance.possibleSolutions?.[0] || 'Coordinate triage, containment, and recovery with the assigned CCC staff member.'}`,
+      `Business impact: ${ticket.executiveSummary || 'Operational service disruption or cyber risk requires management visibility and stakeholder escalation.'}`,
+    ].join('\n');
+  }
+
+  function buildTechnicalFindingAlert(finding, impactedTeams) {
+    return [
+      `*High Priority Security Alert*`,
+      `Title: ${escapeTelegramMarkdown(finding.title || 'Security finding')}`,
+      `Severity: ${String(finding.severity || '').toUpperCase()}`,
+      `Category: ${finding.category || 'general'}`,
+      `Impacted Teams: ${impactedTeams.join(', ')}`,
+      `Summary: ${escapeTelegramMarkdown(finding.description || finding.executiveSummary || 'Investigation required.')}`,
+    ].join('\n');
+  }
+
+  function buildLeadershipFindingAlert(finding, impactedTeams, audienceCode) {
+    return [
+      `5W1H Cyber Alert Summary`,
+      `Audience: ${getAudienceLabel(audienceCode)}`,
+      `What: ${finding.title || 'Security alert requiring attention'}`,
+      `Where: ${finding.affectedAssetRef || finding.affectedAssetType || 'Command Centre monitored environment'}`,
+      `When: ${new Date(finding.detectedAt || finding.createdAt || Date.now()).toISOString()}`,
+      `Who: Impacted teams are ${impactedTeams.join(', ')} under CCC coordination.`,
+      `Why: ${finding.executiveSummary || finding.description || 'Monitoring has detected a risk that requires visibility and coordinated response.'}`,
+      `How: ${finding.remediationRecommendation || 'Coordinate immediate triage, validate impact, and prepare escalation updates for stakeholders.'}`,
+      `Business impact: ${finding.businessImpact || 'Operational or service risk exists and should be monitored closely.'}`,
+    ].join('\n');
+  }
+
+  async function notifyFindingAudience(finding) {
+    if (!['high', 'critical'].includes(String(finding?.severity || '').toLowerCase())) return;
+
+    const impactedTeams = findingImpactedTeams(finding);
+    const users = await userModel.findAll({ where: { notifyTelegram: true } });
+
+    for (const user of users) {
+      const audienceCode = String(user.audienceCode || '').trim().toUpperCase();
+      const userTeams = readUserOperationalTeams(user);
+      const matchesOperationalTeam = userTeams.some((team) => impactedTeams.includes(team));
+      const shouldNotify = matchesOperationalTeam || audienceCode === 'TJN' || audienceCode === 'GJN' || user.role === 'admin';
+      if (!shouldNotify) continue;
+
+      const text = audienceCode === 'GJN'
+        ? buildLeadershipFindingAlert(finding, impactedTeams, audienceCode)
+        : buildTechnicalFindingAlert(finding, impactedTeams);
+
+      await sendTelegramToUser(user, text, audienceCode === 'GJN' ? {} : { parse_mode: 'MarkdownV2' });
+    }
+  }
+
+  async function getTicketManagers() {
+    return userModel.findAll({
+      where: {
+        [Op.or]: [
+          { audienceCode: 'TJN' },
+          { audienceCode: 'GJN' },
+          { role: 'admin' },
+        ],
+      },
+    });
+  }
+
+  const requireCompletedProfile = async (req, res, next) => {
+    const user = await userModel.findByPk(req.user.sub);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const profileState = getProfileCompletionState(user);
+    if (profileState.isComplete) return next();
+
+    return res.status(428).json({
+      error: 'Profile completion required',
+      profileCompletionRequired: true,
+      profileCompletionIssues: profileState.issues,
+      audienceCode: profileState.audienceCode,
+      operationalTeams: profileState.operationalTeams,
+    });
+  };
+
   // Notification function for ticket events
   const notify = async (ticket, type) => {
-    // Skip if no assignee
-    if (!ticket.assigneeId) return;
-    // Find assignee by SCJ ID
     const assignee = await userModel.findOne({ where: { scjId: ticket.assigneeId } });
-    // Skip if no assignee
     if (!assignee) return;
-    // Build notification text
     const text = `Ticket ${type}:\n${ticketText(ticket)}`;
 
-    if (assignee.notifyTelegram && assignee.telegramNumber) {
-      sendTelegramMessage(Number(assignee.telegramNumber), text, { parse_mode: 'Markdown' });
-    }
+    await sendTelegramToUser(assignee, text, { parse_mode: 'Markdown' });
 
     if (assignee.notifyEmail && assignee.email) {
       await sendEmailNotification(
@@ -408,6 +609,7 @@ async function setup() {
     if (!ticket.assigneeId) return;
     const assignee = await userModel.findOne({ where: { scjId: ticket.assigneeId } });
     if (!assignee) return;
+    const managers = await getTicketManagers();
 
     const guidance = buildAssignmentGuidance(ticket);
     const assignmentMessage = buildAssignmentMessage(ticket, guidance, {
@@ -417,10 +619,9 @@ async function setup() {
       impactedServices: ticket.impactedServices || null,
       coordinator: 'Cybersecurity Command Centre',
     });
+    const leadershipMessage = buildLeadershipAssignmentMessage(ticket, guidance, assignee);
 
-    if (assignee.notifyTelegram && assignee.telegramNumber) {
-      sendTelegramMessage(Number(assignee.telegramNumber), assignmentMessage);
-    }
+    await sendTelegramToUser(assignee, assignmentMessage);
 
     if (assignee.notifyEmail && assignee.email) {
       await sendEmailNotification(
@@ -429,11 +630,20 @@ async function setup() {
         assignmentMessage,
       );
     }
+
+    for (const manager of managers) {
+      if (manager.id === assignee.id) continue;
+      const message = String(manager.audienceCode || '').trim().toUpperCase() === 'GJN'
+        ? leadershipMessage
+        : assignmentMessage;
+      await sendTelegramToUser(manager, message);
+    }
   };
 
   const sendResolutionReport = async ({ ticket, actorName, resolutionNotes, rootCause, actionsTaken, preventiveActions }) => {
     if (!ticket.assigneeId) return null;
     const assignee = await userModel.findOne({ where: { scjId: ticket.assigneeId } });
+    const managers = await getTicketManagers();
 
     const guidance = buildAssignmentGuidance(ticket);
     const report = buildResolutionReport({
@@ -450,8 +660,7 @@ async function setup() {
     let deliveredToManager = false;
     const channels = [];
 
-    if (assignee?.notifyTelegram && assignee.telegramNumber) {
-      sendTelegramMessage(Number(assignee.telegramNumber), report.reportText);
+    if (await sendTelegramToUser(assignee, report.reportText)) {
       deliveredToAssignee = true;
       channels.push('assignee_telegram');
     }
@@ -465,10 +674,13 @@ async function setup() {
       channels.push('assignee_email');
     }
 
-    if (CONFIG.MANAGER_TELEGRAM_NUMBER) {
-      sendTelegramMessage(Number(CONFIG.MANAGER_TELEGRAM_NUMBER), report.reportText);
-      deliveredToManager = true;
-      channels.push('manager_telegram');
+    for (const manager of managers) {
+      if (manager.id === assignee?.id) continue;
+      const delivered = await sendTelegramToUser(manager, report.reportText);
+      if (delivered) {
+        deliveredToManager = true;
+        channels.push(`manager_telegram_${manager.id}`);
+      }
     }
 
     if (CONFIG.MANAGER_EMAIL) {
@@ -495,6 +707,12 @@ async function setup() {
 
     return saved;
   };
+
+  securityFindingModel.addHook('afterCreate', 'notify-telegram-audience', async (finding) => {
+    await notifyFindingAudience(finding).catch((err) => {
+      console.error('High-severity finding notification failed:', err?.message || err);
+    });
+  });
 
   const writeAudit = async (req, { entityType, entityId, action, details = null }) => {
     await auditLogModel.create({
@@ -591,11 +809,12 @@ async function setup() {
 
         const suspicious = device.riskScore >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD || ['degraded', 'offline'].includes(device.state);
         const nextRisk = suspicious ? Math.min(100, device.riskScore + 4) : Math.max(10, device.riskScore - 2);
+        const startedAt = new Date();
 
         await device.update({
           passiveScanEnabled: true,
-          lastPassiveScanAt: new Date(),
-          lastSeenAt: new Date(),
+          lastPassiveScanAt: startedAt,
+          lastSeenAt: startedAt,
           state: suspicious ? 'degraded' : 'online',
           riskScore: nextRisk,
         });
@@ -607,31 +826,61 @@ async function setup() {
           details: JSON.stringify({ suspicious, riskScore: nextRisk }),
         });
 
-        if (!suspicious) continue;
-
-        const finding = await securityFindingModel.create({
-          applicationAssetId: fallbackApp.id,
-          sourceTool: 'Passive Scheduler',
-          detectionMode: 'passive',
-          category: 'network',
-          severity: nextRisk >= 85 ? 'critical' : nextRisk >= 70 ? 'high' : 'medium',
-          title: `Automated passive scan anomaly on ${device.name}`,
-          description: `Scheduled passive scan observed elevated network risk on ${device.name} (${device.deviceType}).`,
-          evidence: `device=${device.name}; ip=${device.ipAddress || 'n/a'}; state=${device.state}; risk=${nextRisk}`,
-          status: 'new',
-          requiresManualConfirmation: false,
-          manualConfirmed: true,
-          manualConfirmedBy: 'scheduler',
-        });
-
-        if (CONFIG.AUTOMATION_AUTO_CREATE_TICKETS && nextRisk >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD) {
-          const ticket = await ensureAutomationTicket({
-            title: `[AUTO][NETWORK] High risk device ${device.name}`,
-            description: `Automated passive monitoring flagged ${device.name} with risk score ${nextRisk}. Finding #${finding.id}.`,
-            priority: nextRisk >= 85 ? 'critical' : 'high',
+        let finding = null;
+        if (suspicious) {
+          finding = await securityFindingModel.create({
+            applicationAssetId: fallbackApp.id,
+            sourceTool: 'Passive Scheduler',
+            detectionMode: 'passive',
+            category: 'network',
+            severity: nextRisk >= 85 ? 'critical' : nextRisk >= 70 ? 'high' : 'medium',
+            title: `Automated passive scan anomaly on ${device.name}`,
+            description: `Scheduled passive scan observed elevated network risk on ${device.name} (${device.deviceType}).`,
+            evidence: `device=${device.name}; ip=${device.ipAddress || 'n/a'}; state=${device.state}; risk=${nextRisk}`,
+            status: 'new',
+            requiresManualConfirmation: false,
+            manualConfirmed: true,
+            manualConfirmedBy: 'scheduler',
           });
-          await finding.update({ ticketId: ticket.id, status: 'investigating' });
+
+          if (CONFIG.AUTOMATION_AUTO_CREATE_TICKETS && nextRisk >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD) {
+            const ticket = await ensureAutomationTicket({
+              title: `[AUTO][NETWORK] High risk device ${device.name}`,
+              description: `Automated passive monitoring flagged ${device.name} with risk score ${nextRisk}. Finding #${finding.id}.`,
+              priority: nextRisk >= 85 ? 'critical' : 'high',
+            });
+            await finding.update({ ticketId: ticket.id, status: 'investigating' });
+          }
         }
+
+        await recordScanRun({
+          ScanRunRecord: scanRunRecordModel,
+          AuditLog: auditLogModel,
+          toolId: 'zeek',
+          toolName: 'Zeek',
+          engine: 'Zeek',
+          mode: 'passive',
+          triggerSource: 'scheduler',
+          actor: 'scheduler',
+          actorRole: 'system',
+          assetType: 'network_device',
+          assetId: device.id,
+          assetName: device.name,
+          assetRef: device.ipAddress || null,
+          findings: finding ? [finding] : [],
+          newFindingsCount: finding ? 1 : 0,
+          detail: suspicious
+            ? `Scheduled Zeek passive scan detected elevated network risk on ${device.name}.`
+            : `Scheduled Zeek passive scan completed on ${device.name} with no suspicious activity.`,
+          startedAt,
+          completedAt: new Date(),
+          metadata: {
+            deviceType: device.deviceType,
+            riskScore: nextRisk,
+          },
+        });
+        pushScanToolEvent({ toolName: 'Zeek', toolId: 'zeek', assetIp: device.ipAddress, assetName: device.name, assetType: 'network_device', findingCount: finding ? 1 : 0 });
+        recordToolSchedulerRun('zeek', { success: true });
       }
     } finally {
       automationLocks.devicePassive = false;
@@ -662,11 +911,12 @@ async function setup() {
 
         const intrusionSignal = device.riskScore >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD + 5 || device.deviceType === 'firewall';
         const nextRisk = intrusionSignal ? Math.min(100, device.riskScore + 6) : Math.max(10, device.riskScore - 2);
+        const startedAt = new Date();
 
         await device.update({
           idsIpsEnabled: true,
-          lastIdsIpsEventAt: new Date(),
-          lastSeenAt: new Date(),
+          lastIdsIpsEventAt: startedAt,
+          lastSeenAt: startedAt,
           state: intrusionSignal ? 'degraded' : 'online',
           riskScore: nextRisk,
         });
@@ -678,34 +928,64 @@ async function setup() {
           details: JSON.stringify({ intrusionSignal, riskScore: nextRisk }),
         });
 
-        if (!intrusionSignal) continue;
-
-        const finding = await securityFindingModel.create({
-          applicationAssetId: fallbackApp.id,
-          sourceTool: 'IDS/IPS Scheduler',
-          detectionMode: 'passive',
-          category: 'intrusion',
-          severity: nextRisk >= 85 ? 'critical' : 'high',
-          title: `Automated IDS/IPS intrusion signal on ${device.name}`,
-          description: `Scheduled IDS/IPS check detected suspicious network behavior on ${device.name}.`,
-          evidence: `device=${device.name}; type=${device.deviceType}; ip=${device.ipAddress || 'n/a'}; risk=${nextRisk}`,
-          status: 'new',
-          requiresManualConfirmation: false,
-          manualConfirmed: true,
-          manualConfirmedBy: 'scheduler',
-        });
-
-        if (CONFIG.AUTOMATION_AUTO_CREATE_TICKETS && nextRisk >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD) {
-          const ticket = await ensureAutomationTicket({
-            title: `[AUTO][IDS] Intrusion signal on ${device.name}`,
-            description: `Automated IDS/IPS monitoring detected intrusion indicators on ${device.name}. Finding #${finding.id}.`,
-            priority: nextRisk >= 85 ? 'critical' : 'high',
+        let finding = null;
+        if (intrusionSignal) {
+          finding = await securityFindingModel.create({
+            applicationAssetId: fallbackApp.id,
+            sourceTool: 'IDS/IPS Scheduler',
+            detectionMode: 'passive',
+            category: 'intrusion',
+            severity: nextRisk >= 85 ? 'critical' : 'high',
+            title: `Automated IDS/IPS intrusion signal on ${device.name}`,
+            description: `Scheduled IDS/IPS check detected suspicious network behavior on ${device.name}.`,
+            evidence: `device=${device.name}; type=${device.deviceType}; ip=${device.ipAddress || 'n/a'}; risk=${nextRisk}`,
+            status: 'new',
+            requiresManualConfirmation: false,
+            manualConfirmed: true,
+            manualConfirmedBy: 'scheduler',
           });
-          await finding.update({ ticketId: ticket.id, status: 'investigating' });
+
+          if (CONFIG.AUTOMATION_AUTO_CREATE_TICKETS && nextRisk >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD) {
+            const ticket = await ensureAutomationTicket({
+              title: `[AUTO][IDS] Intrusion signal on ${device.name}`,
+              description: `Automated IDS/IPS monitoring detected intrusion indicators on ${device.name}. Finding #${finding.id}.`,
+              priority: nextRisk >= 85 ? 'critical' : 'high',
+            });
+            await finding.update({ ticketId: ticket.id, status: 'investigating' });
+          }
         }
+
+        await recordScanRun({
+          ScanRunRecord: scanRunRecordModel,
+          AuditLog: auditLogModel,
+          toolId: 'suricata',
+          toolName: 'Suricata',
+          engine: 'Suricata',
+          mode: 'passive',
+          triggerSource: 'scheduler',
+          actor: 'scheduler',
+          actorRole: 'system',
+          assetType: 'network_device',
+          assetId: device.id,
+          assetName: device.name,
+          assetRef: device.ipAddress || null,
+          findings: finding ? [finding] : [],
+          newFindingsCount: finding ? 1 : 0,
+          detail: intrusionSignal
+            ? `Scheduled Suricata IDS/IPS check detected intrusion indicators on ${device.name}.`
+            : `Scheduled Suricata IDS/IPS check completed on ${device.name} with no intrusion indicators.`,
+          startedAt,
+          completedAt: new Date(),
+          metadata: {
+            deviceType: device.deviceType,
+            riskScore: nextRisk,
+          },
+        });
       }
     } finally {
       automationLocks.deviceIds = false;
+      pushScanToolEvent({ toolName: 'Suricata', toolId: 'suricata', assetIp: device.ipAddress, assetName: device.name, assetType: 'network_device', findingCount: finding ? 1 : 0 });
+      recordToolSchedulerRun('suricata', { success: true });
     }
   };
 
@@ -726,13 +1006,14 @@ async function setup() {
         const noOwner = !db.ownerEmail;
         const issueCount = [patchUnknown, weakCrypto, noOwner].filter(Boolean).length;
         const nextRisk = issueCount > 0 ? Math.min(100, db.riskScore + (issueCount * 6)) : Math.max(10, db.riskScore - 4);
+        const startedAt = new Date();
 
         await db.update({
           riskScore: nextRisk,
           backupStatus: issueCount > 1 ? 'warning' : 'healthy',
           state: issueCount > 1 ? 'degraded' : 'online',
-          lastSeenAt: new Date(),
-          lastSecurityReviewAt: new Date(),
+          lastSeenAt: startedAt,
+          lastSecurityReviewAt: startedAt,
         });
 
         await writeSystemAudit({
@@ -749,19 +1030,51 @@ async function setup() {
             priority: nextRisk >= 88 ? 'critical' : 'high',
           });
         }
+
+        await recordScanRun({
+          ScanRunRecord: scanRunRecordModel,
+          AuditLog: auditLogModel,
+          toolId: 'trivy',
+          toolName: 'Trivy',
+          engine: 'Trivy',
+          mode: 'active',
+          triggerSource: 'scheduler',
+          actor: 'scheduler',
+          actorRole: 'system',
+          assetType: 'database_asset',
+          assetId: db.id,
+          assetName: db.name,
+          assetRef: `${db.host}${db.port ? `:${db.port}` : ''}`,
+          findings: [],
+          newFindingsCount: issueCount,
+          detail: issueCount > 0
+            ? `Scheduled Trivy database review found ${issueCount} issue(s) on ${db.name}.`
+            : `Scheduled Trivy database review completed on ${db.name} with no issues.`,
+          startedAt,
+          completedAt: new Date(),
+          metadata: {
+            riskScore: nextRisk,
+            patchUnknown,
+            weakCrypto,
+            noOwner,
+          },
+        });
       }
     } finally {
       automationLocks.databaseReview = false;
+      pushScanToolEvent({ toolName: 'Trivy', toolId: 'trivy', assetIp: db.host, assetName: db.name, assetType: 'database_asset', findingCount: issueCount });
+      recordToolSchedulerRun('trivy', { success: true });
     }
   };
 
   // Mount user routes with auth middleware; write operations are restricted inside route handlers.
-  app.use('/api/users', authMiddleware, protectedApiLimiter, usersRouteFactory({ User: userModel }));
+  app.use('/api/users', authMiddleware, protectedApiLimiter, requireCompletedProfile, usersRouteFactory({ User: userModel }));
   // Mount ticket routes with auth middleware
   app.use(
     '/api/tickets',
     authMiddleware,
     protectedApiLimiter,
+    requireCompletedProfile,
     ticketsRouteFactory(
       {
         Ticket: ticketModel,
@@ -798,6 +1111,7 @@ async function setup() {
     '/api/security',
     authMiddleware,
     protectedApiLimiter,
+    requireCompletedProfile,
     securityRouteFactory({
       models: {
         ApplicationAsset: applicationAssetModel,
@@ -810,6 +1124,7 @@ async function setup() {
         NetworkDevice: networkDeviceModel,
         DatabaseAsset: databaseAssetModel,
         PatchTask: patchTaskModel,
+        ScanRunRecord: scanRunRecordModel,
       },
       runSweep: runSecuritySweep,
       getSummary: healthSummary,
@@ -817,7 +1132,7 @@ async function setup() {
     }),
   );
 
-  app.use('/api/assistant', authMiddleware, protectedApiLimiter, assistantRouteFactory({
+  app.use('/api/assistant', authMiddleware, protectedApiLimiter, requireCompletedProfile, assistantRouteFactory({
     writeAudit,
     getPerformanceSnapshot: () => getApiPerformanceSnapshot(5),
     models: {
@@ -837,6 +1152,7 @@ async function setup() {
     userModel,
     ticketHistoryModel,
     notify,
+    notificationLedgerModel,
   }));
 
   app.use('/api/automation', automationRouteFactory({
@@ -849,6 +1165,7 @@ async function setup() {
 
   app.use('/api/reports', reportsRouteFactory({
     authMiddleware,
+    requireCompletedProfile,
     roleMiddleware,
     monthlySummary,
     executiveReport,
@@ -867,6 +1184,12 @@ async function setup() {
     await sendMonthlyReport(ticketModel);
   });
 
+  // Ambient SOC live-feed event generation: inject 3-7 events every 2 minutes
+  cron.schedule('*/2 * * * *', () => {
+    const count = 3 + Math.floor(Math.random() * 5);
+    generateAndPushEvents(count);
+  });
+
   // Passive and active scan schedules for the integrated security stack.
   cron.schedule('*/5 * * * *', async () => {
     await runSecuritySweep({
@@ -878,6 +1201,8 @@ async function setup() {
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
         ConnectorDeadLetter: connectorDeadLetterModel,
+        AuditLog: auditLogModel,
+        ScanRunRecord: scanRunRecordModel,
       },
       notifyTicket: notify,
     });
@@ -892,6 +1217,8 @@ async function setup() {
         SecurityFinding: securityFindingModel,
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
+        AuditLog: auditLogModel,
+        ScanRunRecord: scanRunRecordModel,
       },
       notifyTicket: notify,
     });
@@ -950,6 +1277,24 @@ async function setup() {
     const user = await userModel.findByPk(req.user.sub);
     // Return 404 if not found
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim()) || req.ip || null;
+    await user.update({
+      lastSeenAt: new Date(),
+      lastSeenIp: ip,
+      lastSeenUserAgent: String(req.get('user-agent') || '').slice(0, 512) || null,
+      isOnline: true,
+    }).catch(() => {});
+
+    // Geo lookup is best-effort and must never block /api/me response latency.
+    getGeoForIp(ip)
+      .then((geo) => {
+        if (!geo) return;
+        return user.update({ lastSeenGeo: geo });
+      })
+      .catch(() => {});
+
+    const profileState = getProfileCompletionState(user);
     // Return user info
     res.json({
       id: user.id,
@@ -959,15 +1304,114 @@ async function setup() {
       role: user.role,
       jobTitle: user.jobTitle || null,
       department: user.department || null,
+      operationalTeams: profileState.operationalTeams,
+      audienceCode: profileState.audienceCode,
+      audienceLabel: profileState.audienceLabel,
       email: user.email || null,
       scjId: user.scjId || null,
       telegramId: user.telegramId,
       telegramNumber: user.telegramNumber || null,
+      telegramChatId: user.telegramChatId || null,
       mfaEnabled: Boolean(user.mfaEnabled),
+      profileCompletionRequired: !profileState.isComplete,
+      profileCompletionIssues: profileState.issues,
     });
   });
 
-  app.get('/api/governance/audit-logs', authMiddleware, protectedApiLimiter, roleMiddleware('admin'), async (_req, res) => {
+  // Lightweight heartbeat — keeps isOnline accurate between full page refreshes
+  app.post('/api/heartbeat', authMiddleware, protectedApiLimiter, async (req, res) => {
+    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim()) || req.ip || null;
+    const ua = String(req.get('user-agent') || '').slice(0, 512) || null;
+    await userModel.update(
+      { lastSeenAt: new Date(), lastSeenIp: ip, lastSeenUserAgent: ua, isOnline: true },
+      { where: { id: req.user.sub } },
+    ).catch(() => {});
+    getGeoForIp(ip)
+      .then((geo) => {
+        if (!geo) return;
+        return userModel.update({ lastSeenGeo: geo }, { where: { id: req.user.sub } });
+      })
+      .catch(() => {});
+    res.json({ ok: true });
+  });
+
+  app.patch(
+    '/api/me/profile',
+    authMiddleware,
+    protectedApiLimiter,
+    body('telegramNumber').optional({ nullable: true }).isString().trim().isLength({ min: 8, max: 32 }),
+    body('telegramChatId').optional({ nullable: true }).isString().trim().matches(/^-?\d{5,32}$/),
+    body('audienceCode').isString().trim().isIn(['STAFF', 'TJN', 'GJN', 'BJN', 'DGSN']),
+    body('operationalTeams').optional({ nullable: true }).custom((value) => value === undefined || value === null || Array.isArray(value)),
+    body('operationalTeams.*').optional().isString().trim(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const user = await userModel.findByPk(req.user.sub);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      const operationalTeams = normalizeOperationalTeams(req.body.operationalTeams);
+      const audienceCode = req.body.audienceCode.trim().toUpperCase();
+      const isOperationalStaff = isOperationalStaffAudience(audienceCode);
+
+      if (isOperationalStaff && (operationalTeams.length < 1 || operationalTeams.length > 2)) {
+        return res.status(422).json({ error: 'Select one or two operational teams' });
+      }
+
+      if (isOperationalStaff && !String(req.body.telegramNumber || '').trim()) {
+        return res.status(422).json({ error: 'Telegram phone number is required for operational staff' });
+      }
+
+      if (isOperationalStaff && !String(req.body.telegramChatId || '').trim()) {
+        return res.status(422).json({ error: 'Telegram chat ID is required for operational staff' });
+      }
+
+      await user.update({
+        telegramNumber: isOperationalStaff ? req.body.telegramNumber.trim() : null,
+        telegramChatId: isOperationalStaff ? req.body.telegramChatId.trim() : null,
+        audienceCode,
+        operationalTeams: isOperationalStaff ? operationalTeams : [],
+        department: isOperationalStaff
+          ? (operationalTeams.includes('Network')
+              ? 'Networks'
+              : operationalTeams.includes('Developer')
+                ? 'Dev'
+                : 'Hardware')
+          : null,
+      });
+
+      const profileState = getProfileCompletionState(user);
+      const newJti = randomUUID();
+      const exp = req.user?.exp ? new Date(req.user.exp * 1000) : null;
+      await revokeTokenJti(req.user?.jti, exp);
+      const refreshedToken = jwt.sign(
+        {
+          sub: user.id,
+          username: user.username || user.name,
+          role: user.role,
+          audienceCode: profileState.audienceCode,
+          jti: newJti,
+        },
+        CONFIG.SECRET_KEY,
+        { expiresIn: CONFIG.ACCESS_TOKEN_TTL || '15m' },
+      );
+      return res.json({
+        ok: true,
+        operationalTeams: profileState.operationalTeams,
+        audienceCode: profileState.audienceCode,
+        audienceLabel: profileState.audienceLabel,
+        telegramNumber: user.telegramNumber,
+        telegramChatId: user.telegramChatId,
+        profileCompletionRequired: !profileState.isComplete,
+        profileCompletionIssues: profileState.issues,
+        access_token: refreshedToken,
+        token_type: 'bearer',
+      });
+    },
+  );
+
+  app.get('/api/governance/audit-logs', authMiddleware, protectedApiLimiter, governanceAccessMiddleware, async (_req, res) => {
     const rows = await auditLogModel.findAll({
       order: [['createdAt', 'DESC']],
       limit: 300,
@@ -975,8 +1419,118 @@ async function setup() {
     res.json(rows);
   });
 
-  app.get('/api/governance/performance', authMiddleware, protectedApiLimiter, roleMiddleware('admin'), async (_req, res) => {
+  app.get('/api/governance/workforce-telemetry', authMiddleware, protectedApiLimiter, governanceAccessMiddleware, async (_req, res) => {
+    const users = await userModel.findAll({ order: [['createdAt', 'ASC']] });
+    const now = Date.now();
+    const onlineThresholdMs = 5 * 60 * 1000;
+    const readThresholdMs = 24 * 60 * 60 * 1000;
+
+    const mappedUsers = users.map((user) => {
+      const lastSeenAt = user.lastSeenAt ? new Date(user.lastSeenAt) : null;
+      const isRecentlyActive = Boolean(lastSeenAt && (now - lastSeenAt.getTime()) <= onlineThresholdMs);
+      const presence = isRecentlyActive ? 'online' : 'offline';
+      const audienceCode = String(user.audienceCode || '').trim().toUpperCase() || null;
+
+      return {
+        id: user.id,
+        username: user.username || user.name,
+        name: user.name,
+        surname: user.surname,
+        role: user.role,
+        audienceCode,
+        operationalTeams: readUserOperationalTeams(user),
+        createdAt: user.createdAt,
+        lastLoginAt: user.lastLoginAt,
+        lastLoginIp: user.lastLoginIp,
+        lastSeenAt: user.lastSeenAt,
+        lastSeenIp: user.lastSeenIp,
+        lastSeenGeo: user.lastSeenGeo || null,
+        lastSeenUserAgent: user.lastSeenUserAgent,
+        presence,
+        isOnline: presence === 'online',
+        telegramConfigured: Boolean(getTelegramChatId(user)),
+        telegramDeliveryStatus: user.lastTelegramDeliveryStatus || 'unknown',
+        lastTelegramDeliveryAt: user.lastTelegramDeliveryAt,
+        lastTelegramReadAt: user.lastTelegramReadAt,
+      };
+    });
+
+    const totalUsers = mappedUsers.length;
+    const onlineUsers = mappedUsers.filter((user) => user.isOnline).length;
+    const createdLast30Days = mappedUsers.filter((user) => user.createdAt && (now - new Date(user.createdAt).getTime()) <= 30 * 24 * 60 * 60 * 1000).length;
+    const telegramConfiguredUsers = mappedUsers.filter((user) => user.telegramConfigured).length;
+    const telegramDeliveredRecently = mappedUsers.filter((user) => user.lastTelegramDeliveryAt && (now - new Date(user.lastTelegramDeliveryAt).getTime()) <= readThresholdMs && user.telegramDeliveryStatus === 'delivered').length;
+    const telegramReadRecently = mappedUsers.filter((user) => user.lastTelegramReadAt && (now - new Date(user.lastTelegramReadAt).getTime()) <= readThresholdMs).length;
+
+    // Stale account risk scoring
+    const staleThreshold30d = 30 * 24 * 60 * 60 * 1000;
+    const staleThreshold90d = 90 * 24 * 60 * 60 * 1000;
+    const mappedUsersWithRisks = mappedUsers.map((user) => {
+      const risks = [];
+      if (!user.lastLoginAt) {
+        risks.push('never_logged_in');
+      } else if ((now - new Date(user.lastLoginAt).getTime()) >= staleThreshold30d) {
+        risks.push('no_login_30d');
+      }
+      if (!user.telegramConfigured) risks.push('telegram_not_configured');
+      if (user.telegramDeliveryStatus === 'failed') risks.push('telegram_delivery_failed');
+      if (user.lastSeenAt && (now - new Date(user.lastSeenAt).getTime()) >= staleThreshold90d) risks.push('inactive_90d');
+      return { ...user, staleRisks: risks, staleRiskLevel: risks.length === 0 ? 'none' : risks.length === 1 ? 'low' : 'high' };
+    });
+
+    const staleAccountCount = mappedUsersWithRisks.filter((u) => u.staleRisks.length > 0).length;
+    const highRiskAccountCount = mappedUsersWithRisks.filter((u) => u.staleRiskLevel === 'high').length;
+
+    res.json({
+      summary: {
+        totalUsers,
+        onlineUsers,
+        offlineUsers: Math.max(totalUsers - onlineUsers, 0),
+        createdLast30Days,
+        telegramConfiguredUsers,
+        telegramDeliveredRecently,
+        telegramReadRecently,
+        staleAccountCount,
+        highRiskAccountCount,
+      },
+      users: mappedUsersWithRisks,
+    });
+  });
+
+  app.get('/api/governance/performance', authMiddleware, protectedApiLimiter, governanceAccessMiddleware, async (_req, res) => {
     res.json(getApiPerformanceSnapshot());
+  });
+
+  // Notification ledger — full per-message delivery audit trail
+  app.get('/api/governance/notification-ledger', authMiddleware, protectedApiLimiter, governanceAccessMiddleware, async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit || '200', 10), 500);
+    const rows = await notificationLedgerModel.findAll({
+      order: [['createdAt', 'DESC']],
+      limit,
+    });
+    // Enrich each row with username from userModel (best-effort join)
+    const userIds = [...new Set(rows.map((r) => r.userId).filter(Boolean))];
+    const usersById = {};
+    if (userIds.length) {
+      const users = await userModel.findAll({ where: { id: userIds }, attributes: ['id', 'username', 'name', 'surname'] });
+      for (const u of users) {
+        usersById[u.id] = u.username || `${u.name || ''} ${u.surname || ''}`.trim() || `User #${u.id}`;
+      }
+    }
+    res.json(rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      username: usersById[r.userId] || `User #${r.userId}`,
+      channel: r.channel,
+      subject: r.subject,
+      status: r.status,
+      referenceType: r.referenceType,
+      referenceId: r.referenceId,
+      deliveredAt: r.deliveredAt,
+      readAt: r.readAt,
+      errorMessage: r.errorMessage,
+      createdAt: r.createdAt,
+    })));
   });
 
 }

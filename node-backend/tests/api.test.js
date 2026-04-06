@@ -12,7 +12,16 @@ beforeAll(async () => {
   // Seed an admin user directly into DB
   const hash = await bcrypt.hash('password123', 10);
   await sequelize.models.User.destroy({ where: {}, truncate: true });
-  await sequelize.models.User.create({ name: 'admin_test', role: 'admin', password_hash: hash });
+  await sequelize.models.User.create({
+    name: 'admin_test',
+    role: 'admin',
+    password_hash: hash,
+    telegramNumber: '+27123456789',
+    telegramChatId: '100000900',
+    audienceCode: 'TJN',
+    operationalTeams: ['Network'],
+    department: 'Networks',
+  });
 
   // Login to get a real token
   const res = await request(app)
@@ -31,6 +40,15 @@ describe('Auth', () => {
     const res = await request(app).get('/api/tickets');
     expect(res.status).toBe(401);
   });
+
+  it('accepts heartbeat for authenticated users', async () => {
+    const res = await request(app)
+      .post('/api/heartbeat')
+      .set('Authorization', `Bearer ${token}`)
+      .send({});
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('ok', true);
+  });
 });
 
 describe('Registration Policy', () => {
@@ -42,6 +60,10 @@ describe('Registration Policy', () => {
         surname: 'Doe',
         scjId: '00361031-00803',
         email: 'jane.doe@nhne.org.za',
+        telegramNumber: '+27110000001',
+        telegramChatId: '100001001',
+        audienceCode: 'TJN',
+        operationalTeams: ['Network'],
         password: 'StrongPassword1!',
       });
 
@@ -74,6 +96,10 @@ describe('Registration Policy', () => {
         surname: 'Smith',
         scjId: '00361031-00804',
         email: 'john.smith@example.com',
+        telegramNumber: '+27110000002',
+        telegramChatId: '100001002',
+        audienceCode: 'GJN',
+        operationalTeams: ['Developer'],
         password: 'StrongPassword1!',
       });
 
@@ -89,6 +115,10 @@ describe('Registration Policy', () => {
         surname: 'Taylor',
         scjId: '00361031-00805',
         email: 'jill.taylor@nhne.org.za',
+        telegramNumber: '+27110000003',
+        telegramChatId: '100001003',
+        audienceCode: 'BJN',
+        operationalTeams: ['Hardware'],
         password: 'WeakPassword123',
       });
 
@@ -319,6 +349,79 @@ describe('Reports, Governance, and Assistant', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(governance.status).toBe(200);
     expect(Array.isArray(governance.body)).toBe(true);
+  });
+
+  it('returns workforce telemetry and notification ledger for governance users', async () => {
+    const workforce = await request(app)
+      .get('/api/governance/workforce-telemetry')
+      .set('Authorization', `Bearer ${token}`);
+    expect(workforce.status).toBe(200);
+    expect(workforce.body).toHaveProperty('summary');
+    expect(workforce.body).toHaveProperty('users');
+    expect(Array.isArray(workforce.body.users)).toBe(true);
+
+    const ledger = await request(app)
+      .get('/api/governance/notification-ledger')
+      .set('Authorization', `Bearer ${token}`);
+    expect(ledger.status).toBe(200);
+    expect(Array.isArray(ledger.body)).toBe(true);
+  });
+
+  it('returns refreshed token after profile update', async () => {
+    const previousToken = token;
+    const updated = await request(app)
+      .patch('/api/me/profile')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        audienceCode: 'TJN',
+        telegramNumber: null,
+        telegramChatId: null,
+        operationalTeams: [],
+      });
+
+    expect(updated.status).toBe(200);
+    expect(updated.body).toHaveProperty('ok', true);
+    expect(updated.body).toHaveProperty('access_token');
+    expect(updated.body).toHaveProperty('token_type', 'bearer');
+    token = updated.body.access_token;
+
+    const oldTokenRequest = await request(app)
+      .get('/api/assistant/command-centre')
+      .set('Authorization', `Bearer ${previousToken}`);
+    expect(oldTokenRequest.status).toBe(401);
+
+    const newTokenRequest = await request(app)
+      .get('/api/assistant/command-centre')
+      .set('Authorization', `Bearer ${token}`);
+    expect(newTokenRequest.status).toBe(200);
+  });
+
+  it('denies governance routes for STAFF audience users', async () => {
+    const staffPassword = 'StrongPassword1!';
+    const register = await request(app)
+      .post('/api/auth/register')
+      .send({
+        name: 'Staff',
+        surname: `Limited${Date.now()}`,
+        scjId: '00361031-00806',
+        email: `staff.limited.${Date.now()}@nhne.org.za`,
+        telegramNumber: '+27110000006',
+        telegramChatId: '100001006',
+        audienceCode: 'STAFF',
+        operationalTeams: ['Network'],
+        password: staffPassword,
+      });
+    expect(register.status).toBe(201);
+
+    const login = await request(app)
+      .post('/api/token')
+      .send({ username: register.body.username, password: staffPassword });
+    expect(login.status).toBe(200);
+
+    const denied = await request(app)
+      .get('/api/governance/workforce-telemetry')
+      .set('Authorization', `Bearer ${login.body.access_token}`);
+    expect(denied.status).toBe(403);
   });
 
   it('returns enriched assistant command-centre context', async () => {

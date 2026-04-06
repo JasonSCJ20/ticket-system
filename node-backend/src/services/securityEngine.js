@@ -5,6 +5,8 @@ import {
   scoreFinding,
   buildExecutiveNarrative,
 } from './findingIntelligence.js';
+import { recordScanRun } from './scanRunLedger.js';
+import { getRegistryToolsForAsset } from './toolRegistry.js';
 
 const PASSIVE_PATTERNS = [
   {
@@ -99,6 +101,12 @@ const ACTIVE_PATTERNS = [
 function randomPattern(mode) {
   const pool = mode === 'active' ? ACTIVE_PATTERNS : PASSIVE_PATTERNS;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function patternForTool(mode, toolName) {
+  const pool = mode === 'active' ? ACTIVE_PATTERNS : PASSIVE_PATTERNS;
+  const exact = pool.find((item) => item.sourceTool === toolName);
+  return exact || randomPattern(mode);
 }
 
 function shouldGenerateFinding(mode) {
@@ -285,29 +293,103 @@ export async function ingestFinding({
 }
 
 export async function runSecuritySweep({ mode, actor = 'system', models, notifyTicket }) {
-  const { ApplicationAsset } = models;
+  const { ApplicationAsset, ScanRunRecord, AuditLog } = models;
   const applications = await ApplicationAsset.findAll({ where: { enabled: true } });
+  const applicationTools = getRegistryToolsForAsset('application', { mode });
 
   const createdFindings = [];
 
   for (const app of applications) {
-    if (shouldGenerateFinding(mode)) {
-      const pattern = randomPattern(mode);
-      const { finding, created } = await ingestFinding({
-        models,
-        notifyTicket,
-        sourceTool: pattern.sourceTool,
-        detectionMode: mode,
-        category: pattern.category,
-        severity: pattern.severity,
-        title: `${app.name}: ${pattern.title}`,
-        description: `${pattern.description} (Target: ${app.baseUrl})`,
-        evidence: `tool=${pattern.sourceTool}; mode=${mode}; app=${app.name}`,
-        appName: app.name,
-        appUrl: app.baseUrl,
-      });
-      if (created) createdFindings.push(finding);
+    const scanStartedAt = new Date();
+
+    for (const tool of applicationTools) {
+      const startedAt = new Date();
+      try {
+        const shouldDetect = shouldGenerateFinding(mode);
+        const pattern = patternForTool(mode, tool.name);
+        let detectedFinding = null;
+        let newFindingsCount = 0;
+
+        if (shouldDetect && pattern) {
+          const { finding, created } = await ingestFinding({
+            models,
+            notifyTicket,
+            sourceTool: tool.name,
+            detectionMode: mode,
+            category: pattern.category,
+            severity: pattern.severity,
+            title: `${app.name}: ${pattern.title}`,
+            description: `${pattern.description} (Target: ${app.baseUrl})`,
+            evidence: `tool=${tool.name}; mode=${mode}; app=${app.name}`,
+            appName: app.name,
+            appUrl: app.baseUrl,
+          });
+          detectedFinding = finding;
+          newFindingsCount = created ? 1 : 0;
+          if (created) createdFindings.push(finding);
+        }
+
+        await recordScanRun({
+          ScanRunRecord,
+          AuditLog,
+          toolId: tool.id,
+          toolName: tool.name,
+          engine: tool.engine,
+          mode,
+          status: 'completed',
+          triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+          actor,
+          actorRole: actor === 'scheduler' ? 'system' : null,
+          assetType: 'application',
+          assetId: app.id,
+          assetName: app.name,
+          assetRef: app.baseUrl,
+          findings: detectedFinding ? [detectedFinding] : [],
+          newFindingsCount,
+          detail: detectedFinding
+            ? `${tool.name} detected a security signal on ${app.name}.`
+            : `${tool.name} completed ${mode} scanning on ${app.name} with no actionable detections.`,
+          startedAt,
+          completedAt: new Date(),
+          metadata: {
+            capability: tool.capability,
+            domain: tool.domain,
+            environment: app.environment,
+          },
+        });
+      } catch (err) {
+        await recordScanRun({
+          ScanRunRecord,
+          AuditLog,
+          toolId: tool.id,
+          toolName: tool.name,
+          engine: tool.engine,
+          mode,
+          status: 'failed',
+          triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+          actor,
+          actorRole: actor === 'scheduler' ? 'system' : null,
+          assetType: 'application',
+          assetId: app.id,
+          assetName: app.name,
+          assetRef: app.baseUrl,
+          findings: [],
+          newFindingsCount: 0,
+          detail: `${tool.name} failed while scanning ${app.name}: ${String(err?.message || err || 'Unknown error')}`,
+          startedAt,
+          completedAt: new Date(),
+          metadata: {
+            capability: tool.capability,
+            domain: tool.domain,
+            environment: app.environment,
+          },
+        });
+      }
     }
+
+    await app.update(mode === 'active'
+      ? { lastActiveScanAt: scanStartedAt }
+      : { lastPassiveScanAt: scanStartedAt });
   }
 
   return createdFindings;

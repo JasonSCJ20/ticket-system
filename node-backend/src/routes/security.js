@@ -3,6 +3,9 @@ import { body, param, query, validationResult } from 'express-validator';
 import { Op } from 'sequelize';
 import { ingestFinding } from '../services/securityEngine.js';
 import { DETECTION_STACK, enrichFindingRecord } from '../services/findingIntelligence.js';
+import { recordScanRun } from '../services/scanRunLedger.js';
+import { TOOL_REGISTRY, getToolRegistryEntryByName, getToolSchedulerState } from '../services/toolRegistry.js';
+import { getLiveFeed, getThreatOrigins, getReconDetections } from '../services/socLiveFeed.js';
 
 const router = express.Router();
 const SCJ_ID_REGEX = /^\d{8}-\d{5}$/;
@@ -63,6 +66,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     NetworkDevice,
     DatabaseAsset,
     PatchTask,
+    ScanRunRecord,
   } = models;
 
   const validPatchAssetTypes = ['application', 'network_device', 'database_asset'];
@@ -312,6 +316,34 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       }
     }
 
+    await recordScanRun({
+      ScanRunRecord,
+      AuditLog,
+      toolId: 'zeek',
+      toolName: 'Zeek',
+      engine: 'Zeek',
+      mode: 'passive',
+      triggerSource: 'manual',
+      actor: req.user.username,
+      actorRole: req.user.role,
+      assetType: 'network_device',
+      assetId: device.id,
+      assetName: device.name,
+      assetRef: device.ipAddress || null,
+      findings: createdFinding ? [createdFinding] : [],
+      newFindingsCount: createdFinding ? 1 : 0,
+      detail: suspicious
+        ? `Zeek passive telemetry observed suspicious traffic on ${device.name}.`
+        : `Zeek passive telemetry completed on ${device.name} with no suspicious activity.`,
+      startedAt: now,
+      completedAt: new Date(),
+      metadata: {
+        deviceType: device.deviceType,
+        location: device.location || null,
+      },
+      ipAddress: req.ip,
+    });
+
     return res.json({ scanned: true, suspicious, findingId: createdFinding?.id || null, device });
   });
 
@@ -352,6 +384,34 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         });
       }
     }
+
+    await recordScanRun({
+      ScanRunRecord,
+      AuditLog,
+      toolId: 'suricata',
+      toolName: 'Suricata',
+      engine: 'Suricata',
+      mode: 'passive',
+      triggerSource: 'manual',
+      actor: req.user.username,
+      actorRole: req.user.role,
+      assetType: 'network_device',
+      assetId: device.id,
+      assetName: device.name,
+      assetRef: device.ipAddress || null,
+      findings: createdFinding ? [createdFinding] : [],
+      newFindingsCount: createdFinding ? 1 : 0,
+      detail: intrusionDetected
+        ? `Suricata IDS/IPS detected intrusion indicators on ${device.name}.`
+        : `Suricata IDS/IPS check completed on ${device.name} with no intrusion indicators.`,
+      startedAt: now,
+      completedAt: new Date(),
+      metadata: {
+        deviceType: device.deviceType,
+        location: device.location || null,
+      },
+      ipAddress: req.ip,
+    });
 
     return res.json({ checked: true, intrusionDetected, findingId: createdFinding?.id || null, device });
   });
@@ -437,6 +497,34 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       backupStatus: findings.length ? 'warning' : 'healthy',
       state: findings.length > 1 ? 'degraded' : 'online',
       lastSeenAt: now,
+    });
+
+    await recordScanRun({
+      ScanRunRecord,
+      AuditLog,
+      toolId: 'trivy',
+      toolName: 'Trivy',
+      engine: 'Trivy',
+      mode: 'active',
+      triggerSource: 'manual',
+      actor: req.user.username,
+      actorRole: req.user.role,
+      assetType: 'database_asset',
+      assetId: asset.id,
+      assetName: asset.name,
+      assetRef: `${asset.host}${asset.port ? `:${asset.port}` : ''}`,
+      findings: [],
+      newFindingsCount: findings.length,
+      detail: findings.length > 0
+        ? `Trivy database security review found ${findings.length} issue(s) on ${asset.name}.`
+        : `Trivy database security review completed on ${asset.name} with no issues.`,
+      startedAt: now,
+      completedAt: new Date(),
+      metadata: {
+        engine: asset.engine,
+        findings,
+      },
+      ipAddress: req.ip,
     });
 
     return res.json({ scanned: true, findings, asset });
@@ -645,6 +733,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       privilegedAuditEvents,
       recentPrivilegedActions,
       recentToolingHeartbeats,
+      recentScanRuns,
     ] = await Promise.all([
       User.count({ where: { role: 'admin' } }),
       SecurityFinding.count({ where: { status: { [Op.in]: ['new', 'investigating'] } } }),
@@ -685,6 +774,11 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         limit: 250,
         raw: true,
       }),
+      ScanRunRecord.findAll({
+        order: [['completedAt', 'DESC'], ['createdAt', 'DESC']],
+        limit: 1500,
+        raw: true,
+      }),
     ]);
 
     const pendingPatches = patchTasks.filter((task) => task.status !== 'completed').length;
@@ -701,24 +795,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     const recentlyReviewedDatabases = databases.filter((asset) => asset.lastSecurityReviewAt && (Date.now() - new Date(asset.lastSecurityReviewAt).getTime()) <= (30 * 24 * 60 * 60 * 1000)).length;
     const nowMs = Date.now();
     const scanWindowMs = 15 * 60 * 1000;
-
-    const recentIdsChecks = devices.filter((device) => (
-      device.lastIdsIpsEventAt && (nowMs - new Date(device.lastIdsIpsEventAt).getTime()) <= scanWindowMs
-    )).length;
-    const recentPassiveScans = devices.filter((device) => (
-      device.lastPassiveScanAt && (nowMs - new Date(device.lastPassiveScanAt).getTime()) <= scanWindowMs
-    )).length;
-    const recentActiveAppScans = applications.filter((asset) => (
-      asset.lastActiveScanAt && (nowMs - new Date(asset.lastActiveScanAt).getTime()) <= scanWindowMs
-    )).length;
-    const recentPassiveAppScans = applications.filter((asset) => (
-      asset.lastPassiveScanAt && (nowMs - new Date(asset.lastPassiveScanAt).getTime()) <= scanWindowMs
-    )).length;
-    const recentDatabaseScans = databases.filter((asset) => (
-      asset.lastSecurityReviewAt && (nowMs - new Date(asset.lastSecurityReviewAt).getTime()) <= scanWindowMs
-    )).length;
     const inProgressPatchTasks = patchTasks.filter((task) => task.status === 'in_progress').length;
-    const hasCommandCentreAssets = applications.length > 0 || devices.length > 0 || databases.length > 0;
     const totalProtectedAssets = applications.length + devices.length + databases.length;
 
     const latestHeartbeatByToolId = recentToolingHeartbeats.reduce((acc, entry) => {
@@ -744,144 +821,86 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       return acc;
     }, {});
 
-    const normalizeCoverage = (value) => {
-      const bounded = Math.max(0, Math.min(totalProtectedAssets, Number.isFinite(Number(value)) ? Number(value) : 0));
+    const assetTotalsByType = {
+      application: applications.length,
+      network_device: devices.length,
+      database_asset: databases.length,
+      command_centre: 1,
+    };
+
+    const normalizeCoverage = (value, totalAssets) => {
+      const total = Math.max(0, Number.isFinite(Number(totalAssets)) ? Number(totalAssets) : 0);
+      const bounded = Math.max(0, Math.min(total, Number.isFinite(Number(value)) ? Number(value) : 0));
       return {
         protectedAssets: bounded,
-        totalAssets: totalProtectedAssets,
-        coveragePct: totalProtectedAssets > 0 ? Number(((bounded / totalProtectedAssets) * 100).toFixed(1)) : 0,
+        totalAssets: total,
+        coveragePct: total > 0 ? Number(((bounded / total) * 100).toFixed(1)) : 0,
       };
     };
 
-    const mergedSecurityTooling = [
-      {
-        id: 'ids-ips',
-        engine: 'Suricata',
-        tool: 'IDS/IPS Sensors',
-        status: idsEnabledDevices > 0 && onlineDevices > 0 ? 'online' : 'offline',
-        scanState: recentIdsChecks > 0 ? 'scanning' : 'not_scanning',
-        detail: `IDS/IPS enabled on ${idsEnabledDevices}/${devices.length || 0} devices`,
-        lastSeenAt: devices.reduce((latest, device) => {
-          const candidate = device?.lastIdsIpsEventAt || device?.updatedAt || null;
-          return candidate && (!latest || new Date(candidate).getTime() > new Date(latest).getTime()) ? candidate : latest;
-        }, null),
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(idsEnabledDevices),
-      },
-      {
-        id: 'network-passive',
-        engine: 'Zeek',
-        tool: 'Passive Network Scanner',
-        status: passiveScanEnabledDevices > 0 ? 'online' : 'offline',
-        scanState: recentPassiveScans > 0 ? 'scanning' : 'not_scanning',
-        detail: `Passive scan configured on ${passiveScanEnabledDevices}/${devices.length || 0} devices`,
-        lastSeenAt: devices.reduce((latest, device) => {
-          const candidate = device?.lastPassiveScanAt || device?.updatedAt || null;
-          return candidate && (!latest || new Date(candidate).getTime() > new Date(latest).getTime()) ? candidate : latest;
-        }, null),
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(passiveScanEnabledDevices),
-      },
-      {
-        id: 'application-active',
-        engine: 'OWASP ZAP',
-        tool: 'Active Application Scanner',
-        status: applications.length > 0 ? 'online' : 'offline',
-        scanState: recentActiveAppScans > 0 ? 'scanning' : 'not_scanning',
-        detail: `Applications monitored: ${applications.length}`,
-        lastSeenAt: applications.reduce((latest, asset) => {
-          const candidate = asset?.lastActiveScanAt || asset?.updatedAt || null;
-          return candidate && (!latest || new Date(candidate).getTime() > new Date(latest).getTime()) ? candidate : latest;
-        }, null),
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(applications.length),
-      },
-      {
-        id: 'application-passive',
-        engine: 'Suricata',
-        tool: 'Passive Application Scanner',
-        status: applications.length > 0 ? 'online' : 'offline',
-        scanState: recentPassiveAppScans > 0 ? 'scanning' : 'not_scanning',
-        detail: `Passive telemetry across ${applications.length} applications`,
-        lastSeenAt: applications.reduce((latest, asset) => {
-          const candidate = asset?.lastPassiveScanAt || asset?.updatedAt || null;
-          return candidate && (!latest || new Date(candidate).getTime() > new Date(latest).getTime()) ? candidate : latest;
-        }, null),
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(applications.length),
-      },
-      {
-        id: 'database-security',
-        engine: 'Trivy',
-        tool: 'Database Security Scanner',
-        status: databases.length > 0 ? 'online' : 'offline',
-        scanState: recentDatabaseScans > 0 ? 'scanning' : 'not_scanning',
-        detail: `Databases monitored: ${databases.length}`,
-        lastSeenAt: databases.reduce((latest, asset) => {
-          const candidate = asset?.lastSecurityReviewAt || asset?.updatedAt || null;
-          return candidate && (!latest || new Date(candidate).getTime() > new Date(latest).getTime()) ? candidate : latest;
-        }, null),
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(databases.length),
-      },
-      {
-        id: 'patch-orchestrator',
-        engine: 'Ansible',
-        tool: 'Patch Orchestrator',
-        status: 'online',
-        scanState: inProgressPatchTasks > 0 ? 'scanning' : 'not_scanning',
-        detail: `Patch tasks in progress: ${inProgressPatchTasks}`,
-        lastSeenAt: patchTasks.reduce((latest, task) => {
-          const candidate = task?.lastActionAt || task?.updatedAt || null;
-          return candidate && (!latest || new Date(candidate).getTime() > new Date(latest).getTime()) ? candidate : latest;
-        }, null),
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(totalProtectedAssets),
-      },
-      {
-        id: 'audit-telemetry',
-        engine: 'OpenSearch',
-        tool: 'Audit Telemetry Pipeline',
-        status: auditEvents > 0 ? 'online' : 'offline',
-        scanState: auditEvents > 0 ? 'scanning' : 'not_scanning',
-        detail: `Total audit events: ${auditEvents}`,
-        lastSeenAt: recentPrivilegedActions[0]?.createdAt || null,
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(totalProtectedAssets),
-      },
-      {
-        id: 'runtime-guardian',
-        engine: 'Cilium Tetragon',
-        tool: 'Runtime Threat Hunting and Response',
-        status: hasCommandCentreAssets ? 'online' : 'offline',
-        scanState: privilegedAuditEvents > 0 ? 'scanning' : 'not_scanning',
-        detail: 'eBPF runtime protection scope: command centre and registered assets',
-        lastSeenAt: recentPrivilegedActions[0]?.createdAt || null,
-        protectsCommandCentre: true,
-        protectedAssetCoverage: normalizeCoverage(totalProtectedAssets),
-      },
-    ].map((tool) => {
-      const heartbeat = latestHeartbeatByToolId[tool.id];
-      if (!heartbeat) return tool;
+    const recentRunsByToolId = recentScanRuns.reduce((acc, run) => {
+      if (!run?.toolId) return acc;
+      if (!acc[run.toolId]) acc[run.toolId] = [];
+      acc[run.toolId].push(run);
+      return acc;
+    }, {});
 
-      const effectiveProtectedAssets = heartbeat.protectedAssets ?? tool.protectedAssetCoverage.protectedAssets;
-      const coverage = normalizeCoverage(effectiveProtectedAssets);
+    const coverageWindowMs = 24 * 60 * 60 * 1000;
+    const mergedSecurityTooling = TOOL_REGISTRY.map((tool) => {
+      const toolRuns = recentRunsByToolId[tool.id] || [];
+      const latestRun = toolRuns[0] || null;
+      const heartbeat = latestHeartbeatByToolId[tool.id];
+      const supportedAssetTypes = Array.isArray(tool.supportedAssetTypes) ? tool.supportedAssetTypes : [];
+      const applicableAssetTotal = supportedAssetTypes
+        .filter((assetType) => assetType !== 'command_centre')
+        .reduce((sum, assetType) => sum + (assetTotalsByType[assetType] || 0), 0);
+
+      const coveredAssetKeys = new Set(
+        toolRuns
+          .filter((run) => {
+            const completedAt = run.completedAt || run.startedAt || run.createdAt || null;
+            return completedAt && (Date.now() - new Date(completedAt).getTime()) <= coverageWindowMs && run.status === 'completed';
+          })
+          .map((run) => `${run.assetType}:${run.assetId || 0}`),
+      );
+
+      const runCoverage = normalizeCoverage(coveredAssetKeys.size, applicableAssetTotal);
+      const commandCentreProtected = tool.protectsCommandCentre && (
+        toolRuns.some((run) => run.assetType === 'command_centre' && run.status === 'completed')
+        || ['patch-orchestrator', 'audit-telemetry', 'runtime-guardian'].includes(tool.id)
+      );
+      const inferredStatus = applicableAssetTotal > 0 || tool.protectsCommandCentre ? 'online' : 'offline';
+      const latestRunAt = latestRun?.completedAt || latestRun?.startedAt || null;
+      const inferredScanState = latestRunAt && (Date.now() - new Date(latestRunAt).getTime()) <= scanWindowMs
+        ? 'scanning'
+        : 'not_scanning';
+      const effectiveCoverage = heartbeat
+        ? normalizeCoverage(heartbeat.protectedAssets ?? runCoverage.protectedAssets, heartbeat.totalAssets ?? runCoverage.totalAssets)
+        : runCoverage;
+
       return {
-        ...tool,
-        status: heartbeat.status || tool.status,
-        scanState: heartbeat.scanState || tool.scanState,
-        detail: heartbeat.detail || tool.detail,
-        lastSeenAt: heartbeat.lastSeenAt || tool.lastSeenAt,
-        protectsCommandCentre: typeof heartbeat.protectsCommandCentre === 'boolean' ? heartbeat.protectsCommandCentre : tool.protectsCommandCentre,
-        protectedAssetCoverage: {
-          protectedAssets: heartbeat.totalAssets && heartbeat.totalAssets !== totalProtectedAssets
-            ? Math.max(0, Math.min(heartbeat.totalAssets, Number(heartbeat.protectedAssets ?? coverage.protectedAssets)))
-            : coverage.protectedAssets,
-          totalAssets: heartbeat.totalAssets && heartbeat.totalAssets > 0 ? Number(heartbeat.totalAssets) : coverage.totalAssets,
-          coveragePct: heartbeat.totalAssets && heartbeat.totalAssets > 0
-            ? Number((((heartbeat.protectedAssets ?? coverage.protectedAssets) / heartbeat.totalAssets) * 100).toFixed(1))
-            : coverage.coveragePct,
-        },
+        id: tool.id,
+        engine: tool.engine,
+        tool: tool.tool,
+        status: heartbeat?.status || inferredStatus,
+        scanState: heartbeat?.scanState || inferredScanState,
+        detail: heartbeat?.detail
+          || latestRun?.detail
+          || `${tool.capability}. Auditable runs captured: ${toolRuns.length}.`,
+        lastSeenAt: heartbeat?.lastSeenAt || latestRunAt || null,
+        protectsCommandCentre: typeof heartbeat?.protectsCommandCentre === 'boolean'
+          ? heartbeat.protectsCommandCentre
+          : commandCentreProtected,
+        supportedAssetTypes,
+        protectedAssetCoverage: effectiveCoverage,
+        auditableRunsCount: toolRuns.length,
+        latestRunStatus: latestRun?.status || null,
+        latestRunAt,
+        capability: tool.capability,
+        mode: tool.mode,
+        openSource: tool.openSource,
+        fidelityLevel: tool.fidelityLevel || 'simulated',
+        cadenceMinutes: tool.cadenceMinutes || null,
       };
     });
 
@@ -1618,6 +1637,36 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     });
   });
 
+  router.get(
+    '/scan/runs',
+    query('assetType').optional().isIn(['application', 'network_device', 'database_asset', 'command_centre']),
+    query('assetId').optional().isInt({ min: 1 }),
+    query('toolId').optional().isString().trim().isLength({ min: 2, max: 64 }),
+    query('limit').optional().isInt({ min: 1, max: 1000 }),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const where = {};
+      if (req.query.assetType) where.assetType = req.query.assetType;
+      if (req.query.assetId) where.assetId = Number(req.query.assetId);
+      if (req.query.toolId) where.toolId = String(req.query.toolId).trim();
+
+      const limit = req.query.limit ? Number(req.query.limit) : 400;
+      const rows = await ScanRunRecord.findAll({
+        where,
+        order: [['completedAt', 'DESC'], ['createdAt', 'DESC']],
+        limit,
+      });
+
+      return res.json({
+        generatedAt: new Date().toISOString(),
+        total: rows.length,
+        rows,
+      });
+    },
+  );
+
   router.post(
     '/scan/tool/:tool',
     adminOnly,
@@ -1640,6 +1689,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
 
       const requestedTool = String(req.params.tool || '').trim();
       const tool = DETECTION_STACK.find((t) => t.name.toLowerCase() === requestedTool.toLowerCase());
+      const registryTool = getToolRegistryEntryByName(requestedTool);
       if (!tool) {
         return res.status(404).json({
           error: 'Unknown tool. Use /api/security/detection/stack to view available tool names.',
@@ -1686,6 +1736,37 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
           actor: req.user.username,
           triggeredAt: new Date().toISOString(),
         },
+      });
+
+      const linkedAsset = result.finding?.applicationAssetId
+        ? await ApplicationAsset.findByPk(Number(result.finding.applicationAssetId))
+        : null;
+
+      await recordScanRun({
+        ScanRunRecord,
+        AuditLog,
+        toolId: registryTool?.id || String(requestedTool).toLowerCase(),
+        toolName: tool.name,
+        engine: registryTool?.engine || tool.name,
+        mode: tool.mode,
+        triggerSource: 'manual',
+        actor: req.user.username,
+        actorRole: req.user.role,
+        assetType: linkedAsset ? 'application' : 'command_centre',
+        assetId: linkedAsset?.id || null,
+        assetName: linkedAsset?.name || 'Command Centre',
+        assetRef: linkedAsset?.baseUrl || null,
+        findings: result.finding ? [result.finding] : [],
+        newFindingsCount: result.created ? 1 : 0,
+        detail: `${tool.name} manual run recorded ${result.created ? 'a new finding' : 'an auditable finding signal'} for ${linkedAsset?.name || 'the command centre'}.`,
+        startedAt: new Date(),
+        completedAt: new Date(),
+        metadata: {
+          requestedTool,
+          domain: tool.domain,
+          capability: registryTool?.capability || tool.capability || null,
+        },
+        ipAddress: req.ip,
       });
 
       return res.status(result.created ? 201 : 200).json({
@@ -1834,6 +1915,51 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       return res.status(201).json({ findingId: finding.id, ticketId: ticket.id });
     },
   );
+
+  // ─── SOC Live Telemetry Endpoints ───────────────────────────────────────────
+
+  router.get(
+    '/soc/live-feed',
+    query('limit').optional().isInt({ min: 1, max: 200 }),
+    query('since').optional().isISO8601(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+      const limit = req.query.limit ? Number(req.query.limit) : 60;
+      const since = req.query.since || null;
+      const events = getLiveFeed({ limit, since });
+      return res.json({ generatedAt: new Date().toISOString(), total: events.length, events });
+    },
+  );
+
+  router.get('/soc/threat-origins', async (_req, res) => {
+    const origins = getThreatOrigins();
+    const total = origins.reduce((s, o) => s + o.count, 0);
+    const topCountry = origins[0]?.country || null;
+    return res.json({ generatedAt: new Date().toISOString(), totalAttacks: total, topCountry, origins });
+  });
+
+  router.get('/soc/recon-detections', async (_req, res) => {
+    const detections = getReconDetections();
+    return res.json({ generatedAt: new Date().toISOString(), scannerCount: detections.length, detections });
+  });
+
+  router.get('/soc/scheduler-state', async (_req, res) => {
+    const state = getToolSchedulerState();
+    const toolsWithState = TOOL_REGISTRY.map((tool) => ({
+      id: tool.id,
+      name: tool.name,
+      engine: tool.engine,
+      fidelityLevel: tool.fidelityLevel || 'simulated',
+      cadenceMinutes: tool.cadenceMinutes || null,
+      mode: tool.mode,
+      domain: tool.domain,
+      ...(state[tool.id] || { totalRuns: 0, successCount: 0, failureCount: 0, lastSuccessAt: null, lastFailureAt: null }),
+    }));
+    return res.json({ generatedAt: new Date().toISOString(), state: toolsWithState });
+  });
+
+  // ─── Dead Letter Queue ────────────────────────────────────────────────────────
 
   router.get(
     '/dead-letters',

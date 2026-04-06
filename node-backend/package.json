@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --forceExit"
+    "test": "set NODE_ENV=test&& set DATABASE_URL=sqlite://./ticket_system_node.test.db&& node --experimental-vm-modules node_modules/jest/bin/jest.js --forceExit"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

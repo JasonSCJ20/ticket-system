@@ -42,7 +42,9 @@ export const initModels = async () => {
   const networkDeviceModel = (await import('./networkDevice.js')).default(sequelize);
   const databaseAssetModel = (await import('./databaseAsset.js')).default(sequelize);
   const patchTaskModel = (await import('./patchTask.js')).default(sequelize);
+  const scanRunRecordModel = (await import('./scanRunRecord.js')).default(sequelize);
   const revokedTokenModel = (await import('./revokedToken.js')).default(sequelize);
+  const notificationLedgerModel = (await import('./notificationLedger.js')).default(sequelize);
 
   // Define relationships by SCJ ID instead of numeric PK.
   userModel.hasMany(ticketModel, { foreignKey: 'assigneeId', sourceKey: 'scjId', as: 'assignedTickets', constraints: false });
@@ -92,11 +94,24 @@ export const initModels = async () => {
     await ensureColumn('Users', 'username', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'surname', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'department', { type: DataTypes.STRING, allowNull: true });
+    await ensureColumn('Users', 'operationalTeams', { type: DataTypes.JSON, allowNull: false, defaultValue: [] });
+    await ensureColumn('Users', 'audienceCode', { type: DataTypes.STRING(8), allowNull: true });
     await ensureColumn('Users', 'jobTitle', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'scjId', { type: DataTypes.STRING(14), allowNull: true });
     await ensureColumn('Users', 'email', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'telegramNumber', { type: DataTypes.STRING(32), allowNull: true });
+    await ensureColumn('Users', 'telegramChatId', { type: DataTypes.STRING(32), allowNull: true });
     await ensureColumn('Users', 'notifyEmail', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true });
+    await ensureColumn('Users', 'lastLoginAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('Users', 'lastLoginIp', { type: DataTypes.STRING(64), allowNull: true });
+    await ensureColumn('Users', 'lastSeenAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('Users', 'lastSeenIp', { type: DataTypes.STRING(64), allowNull: true });
+    await ensureColumn('Users', 'lastSeenUserAgent', { type: DataTypes.STRING(512), allowNull: true });
+    await ensureColumn('Users', 'isOnline', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
+    await ensureColumn('Users', 'lastTelegramDeliveryAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('Users', 'lastTelegramDeliveryStatus', { type: DataTypes.STRING(32), allowNull: true });
+    await ensureColumn('Users', 'lastTelegramReadAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('Users', 'lastSeenGeo', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'mfaEnabled', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
     await ensureColumn('Users', 'mfaSecret', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCode', { type: DataTypes.STRING(16), allowNull: true });
@@ -154,6 +169,12 @@ export const initModels = async () => {
     await ensureIndex('DatabaseAssets', ['backupStatus'], 'idx_database_assets_backup_status');
     await ensureIndex('DatabaseAssets', ['state'], 'idx_database_assets_state');
     await ensureIndex('ApplicationAssets', ['healthStatus'], 'idx_application_assets_health_status');
+    await ensureIndex('ScanRunRecords', ['toolId', 'completedAt'], 'idx_scan_run_records_tool_completed_at');
+    await ensureIndex('ScanRunRecords', ['assetType', 'assetId', 'completedAt'], 'idx_scan_run_records_asset_completed_at');
+    await ensureIndex('ScanRunRecords', ['status'], 'idx_scan_run_records_status');
+    await ensureIndex('NotificationLedgers', ['userId'], 'idx_notification_ledgers_user_id');
+    await ensureIndex('NotificationLedgers', ['status'], 'idx_notification_ledgers_status');
+    await ensureIndex('NotificationLedgers', ['createdAt'], 'idx_notification_ledgers_created_at');
   }
   // Return initialized models
   return {
@@ -171,6 +192,8 @@ export const initModels = async () => {
     networkDeviceModel,
     databaseAssetModel,
     patchTaskModel,
+    scanRunRecordModel,
     revokedTokenModel,
+    notificationLedgerModel,
   };
 };

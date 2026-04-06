@@ -1,5 +1,12 @@
 import express from 'express';
 import { isValidScjId, validatePassword } from '../utils.js';
+import {
+  AUDIENCE_CODE_LABELS,
+  derivePrimaryDepartment,
+  getProfileCompletionState,
+  isOperationalStaffAudience,
+  normalizeOperationalTeams,
+} from '../services/userProfile.js';
 
 const NHNE_EMAIL_DOMAIN = '@nhne.org.za';
 const SCJ_ID_EXAMPLE = '00000000-00000';
@@ -14,6 +21,10 @@ function buildUsername(name, surname) {
 
 function isNhneEmail(email = '') {
   return email.trim().toLowerCase().endsWith(NHNE_EMAIL_DOMAIN);
+}
+
+function isConfiguredAdminUsername(username = '', config = {}) {
+  return String(username || '').trim().toLowerCase() === String(config.ADMIN_USERNAME || '').trim().toLowerCase();
 }
 
 function getRegisterConflictMessage(error) {
@@ -52,6 +63,13 @@ export default function authRouteFactory({
     body('scjId').isString().trim().isLength({ min: 14, max: 14 }).withMessage(`SCJ ID must be format ${SCJ_ID_EXAMPLE}`),
     body('email').isEmail().normalizeEmail().withMessage('Email is required and must be valid'),
     body('password').isString().isLength({ min: 12, max: 128 }).withMessage('Password must be at least 12 characters'),
+    body('telegramNumber').optional({ nullable: true }).isString().trim().isLength({ min: 8, max: 32 }).withMessage('Telegram phone number must be valid'),
+    body('telegramChatId').optional({ nullable: true }).isString().trim().matches(/^-?\d{5,32}$/).withMessage('Telegram chat ID must be numeric'),
+    body('audienceCode').isString().trim().isIn(Object.keys(AUDIENCE_CODE_LABELS)).withMessage('Audience code is required'),
+    body('operationalTeams')
+      .optional({ nullable: true })
+      .custom((value) => value === undefined || value === null || Array.isArray(value))
+      .withMessage('Select one or two operational teams'),
     body('username').optional().isString().trim().isLength({ min: 3, max: 255 }),
     async (req, res) => {
       const errors = validationResult(req);
@@ -63,6 +81,19 @@ export default function authRouteFactory({
       const email = req.body.email.trim().toLowerCase();
       const username = buildUsername(name, surname);
       const submittedUsername = req.body.username?.trim();
+      const telegramNumber = req.body.telegramNumber ? req.body.telegramNumber.trim() : null;
+      const telegramChatId = req.body.telegramChatId ? req.body.telegramChatId.trim() : null;
+      const audienceCode = req.body.audienceCode.trim().toUpperCase();
+      const operationalTeams = normalizeOperationalTeams(req.body.operationalTeams);
+      const isOperationalStaff = isOperationalStaffAudience(audienceCode);
+
+      if (isOperationalStaff && (operationalTeams.length < 1 || operationalTeams.length > 2)) {
+        return res.status(422).json({ error: 'Select one or two operational teams' });
+      }
+
+      if (isOperationalStaff && !telegramNumber) {
+        return res.status(422).json({ error: 'Telegram phone number is required for operational staff' });
+      }
 
       if (submittedUsername && submittedUsername !== username) {
         return res.status(422).json({ error: 'Username must match the provided name and surname' });
@@ -84,7 +115,7 @@ export default function authRouteFactory({
       try {
         const existing = await userModel.findOne({
           where: {
-            [Op.or]: [{ username }, { email }, { scjId }],
+            [Op.or]: [{ username }, { email }, { scjId }, ...(telegramNumber ? [{ telegramNumber }] : []), ...(telegramChatId ? [{ telegramChatId }] : [])],
           },
         });
         if (existing) return res.status(409).json({ error: 'Name and surname, email, or SCJ ID already exists' });
@@ -94,13 +125,19 @@ export default function authRouteFactory({
           username,
           name,
           surname,
-          department: null,
+          department: isOperationalStaff ? derivePrimaryDepartment(operationalTeams) : null,
+          operationalTeams: isOperationalStaff ? operationalTeams : [],
+          audienceCode,
           jobTitle: 'Security Analyst',
           scjId,
           email,
+          telegramNumber,
+          telegramChatId,
           role: 'analyst',
           password_hash: passwordHash,
         });
+
+        const profileState = getProfileCompletionState(created);
 
         return res.status(201).json({
           id: created.id,
@@ -109,7 +146,11 @@ export default function authRouteFactory({
           surname: created.surname,
           scjId: created.scjId,
           email: created.email,
+          telegramNumber: created.telegramNumber,
+          operationalTeams,
+          audienceCode,
           role: created.role,
+          profileCompletionRequired: !profileState.isComplete,
           message: 'Account created. You can now log in.',
         });
       } catch (error) {
@@ -325,7 +366,46 @@ export default function authRouteFactory({
         });
       }
 
-      if (!user || !user.password_hash || !bcrypt.compareSync(password, user.password_hash)) {
+      // Dev/local resilience: if configured admin credentials are provided but DB is out-of-sync,
+      // recreate/repair the admin account transparently during login.
+      const isConfiguredAdminAttempt = isConfiguredAdminUsername(normalizedUsername, config)
+        && password === config.ADMIN_PASSWORD;
+      if (!user && isConfiguredAdminAttempt) {
+        const repairedHash = bcrypt.hashSync(config.ADMIN_PASSWORD, 10);
+        const [adminUser] = await userModel.findOrCreate({
+          where: {
+            [Op.or]: [{ username: config.ADMIN_USERNAME }, { name: config.ADMIN_USERNAME }],
+          },
+          defaults: {
+            username: config.ADMIN_USERNAME,
+            name: config.ADMIN_USERNAME,
+            surname: null,
+            role: 'admin',
+            password_hash: repairedHash,
+          },
+        });
+
+        await adminUser.update({
+          username: config.ADMIN_USERNAME,
+          name: config.ADMIN_USERNAME,
+          role: 'admin',
+          password_hash: repairedHash,
+        });
+
+        user = adminUser;
+      }
+
+      if (!user) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      if (!user.password_hash) {
+        return res.status(401).json({
+          error: 'This account has no local password configured. Create an account or use password recovery to set one.',
+        });
+      }
+
+      if (!bcrypt.compareSync(password, user.password_hash)) {
         return res.status(401).json({ error: 'Invalid credentials' });
       }
 
@@ -348,19 +428,45 @@ export default function authRouteFactory({
       }
 
       const jti = randomUUID();
+      const now = new Date();
+      const audienceCode = String(user.audienceCode || '').trim().toUpperCase() || null;
+      await user.update({
+        lastLoginAt: now,
+        lastLoginIp: req.ip || null,
+        lastSeenAt: now,
+        lastSeenIp: req.ip || null,
+        lastSeenUserAgent: String(req.get('user-agent') || '').slice(0, 512) || null,
+        isOnline: true,
+      });
 
       const token = jwt.sign(
-        { sub: user.id, username: user.username || user.name, role: user.role, jti },
+        { sub: user.id, username: user.username || user.name, role: user.role, audienceCode, jti },
         config.SECRET_KEY,
         { expiresIn: config.ACCESS_TOKEN_TTL || '15m' },
       );
-      return res.json({ access_token: token, token_type: 'bearer', mfaEnabled: Boolean(user.mfaEnabled) });
+      const profileState = getProfileCompletionState(user);
+      return res.json({
+        access_token: token,
+        token_type: 'bearer',
+        mfaEnabled: Boolean(user.mfaEnabled),
+        profileCompletionRequired: !profileState.isComplete,
+        profileCompletionIssues: profileState.issues,
+      });
     },
   );
 
   router.post('/auth/logout', authMiddleware, async (req, res) => {
     const exp = req.user?.exp ? new Date(req.user.exp * 1000) : null;
     await revokeTokenJti(req.user?.jti, exp);
+    const user = await userModel.findByPk(req.user.sub);
+    if (user) {
+      await user.update({
+        isOnline: false,
+        lastSeenAt: new Date(),
+        lastSeenIp: req.ip || null,
+        lastSeenUserAgent: String(req.get('user-agent') || '').slice(0, 512) || null,
+      });
+    }
     return res.json({ ok: true });
   });
 

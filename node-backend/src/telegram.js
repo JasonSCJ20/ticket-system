@@ -8,12 +8,31 @@ export const bot = CONFIG.TELEGRAM_BOT_TOKEN
   ? new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, { polling: false })
   : null;
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Function to send a message via Telegram bot
-export function sendTelegramMessage(chatId, text, options = {}) {
-  // Skip if no bot token configured
-  if (!bot || !chatId) return;
-  // Send message and catch any errors
-  bot.sendMessage(chatId, text, options).catch(console.error);
+export async function sendTelegramMessage(chatId, text, options = {}) {
+  if (!bot || !chatId) return false;
+
+  const retries = Number.isInteger(options.retries) ? options.retries : 2;
+  const sendOptions = { ...options };
+  delete sendOptions.retries;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      await bot.sendMessage(chatId, text, sendOptions);
+      return true;
+    } catch (error) {
+      const finalAttempt = attempt >= retries;
+      console.error(`Telegram delivery failed for chat ${chatId} on attempt ${attempt + 1}:`, error?.message || error);
+      if (finalAttempt) return false;
+      await delay(750 * (attempt + 1));
+    }
+  }
+
+  return false;
 }
 
 // Function to format ticket information as text

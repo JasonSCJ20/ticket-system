@@ -9,6 +9,7 @@ export default function webhooksRouteFactory({
   userModel,
   ticketHistoryModel,
   notify,
+  notificationLedgerModel,
 }) {
   const router = express.Router();
 
@@ -26,6 +27,25 @@ export default function webhooksRouteFactory({
 
     const from = message.from;
     const [user] = await findOrCreateUser(from);
+    const now = new Date();
+    await user.update({
+      lastSeenAt: now,
+      lastSeenIp: req.ip || null,
+      lastSeenUserAgent: 'telegram-webhook',
+      isOnline: true,
+      lastTelegramReadAt: now,
+      lastTelegramDeliveryStatus: 'read',
+    }).catch(() => {});
+
+    // Mark the most recent unread delivered ledger entry for this user as read
+    if (notificationLedgerModel) {
+      const latest = await notificationLedgerModel.findOne({
+        where: { userId: user.id, status: 'delivered', readAt: null },
+        order: [['createdAt', 'DESC']],
+      }).catch(() => null);
+      if (latest) await latest.update({ status: 'read', readAt: now }).catch(() => {});
+    }
+
     const state = telegramConversations.get(from.id) || { step: null, ticket: { creatorId: user.id } };
 
     if (text.startsWith('/newticket')) {
