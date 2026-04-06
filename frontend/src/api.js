@@ -4,7 +4,7 @@
 // 3) In any non-local deployment, default to the remote Render API origin.
 const FRONTEND_HOST = typeof window !== 'undefined' ? window.location.hostname : ''
 const IS_LOCAL_HOST = /^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$/i.test(FRONTEND_HOST)
-const DEFAULT_REMOTE_API_URL = 'https://scj-command-centre-api.onrender.com/api'
+const DEFAULT_REMOTE_API_URL = 'https://scj-ticket-system.onrender.com/api'
 const API_URL = import.meta.env.VITE_API_URL || (IS_LOCAL_HOST ? '/api' : DEFAULT_REMOTE_API_URL)
 
 /**

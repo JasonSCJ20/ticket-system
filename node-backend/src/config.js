@@ -56,7 +56,7 @@ export const CONFIG = {
   API_AUTH_RATE_LIMIT_MAX: Number(process.env.API_AUTH_RATE_LIMIT_MAX || 1200),
   API_PROTECTED_RATE_LIMIT_WINDOW_MS: Number(process.env.API_PROTECTED_RATE_LIMIT_WINDOW_MS || 60_000),
   API_PROTECTED_RATE_LIMIT_MAX: Number(process.env.API_PROTECTED_RATE_LIMIT_MAX || 250000),
-  CORS_ALLOWED_ORIGINS: String(process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,https://1ccf53ed.ticket-system-frontend-f77.pages.dev'),
+  CORS_ALLOWED_ORIGINS: String(process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:4173,https://ticket-system-frontend-f77.pages.dev'),
   // SMTP settings for email notifications
   SMTP_HOST: process.env.SMTP_HOST || '',
   SMTP_PORT: Number(process.env.SMTP_PORT || 587),
