@@ -3,8 +3,11 @@ import dotenv from 'dotenv';
 // Load environment variables from .env file
 dotenv.config();
 
-const DEFAULT_ADMIN_USERNAME = 'Jason Tshaka';
-const DEFAULT_ADMIN_PASSWORD = 'SCJ@Sentinel2026!';
+// Obviously-fake placeholders — local/dev convenience only, never a real
+// credential. Production must override both via real env vars or the
+// process refuses to start (see enforceProductionSecrets below).
+const DEFAULT_ADMIN_USERNAME = 'local-dev-admin';
+const DEFAULT_ADMIN_PASSWORD = 'change-me-local-dev-only';
 
 // Refuse to start in production with insecure default secrets.
 // Set NODE_ENV=production to activate this guard.
@@ -24,9 +27,10 @@ function enforceProductionSecrets() {
     fatal.push('DATABASE_URL must point to a PostgreSQL or MySQL instance in production (not SQLite).');
   }
   if (fatal.length > 0) {
-    console.error('\n[WARN] Production configuration is insecure or incomplete:\n');
+    console.error('\n[FATAL] Refusing to start: production configuration is insecure or incomplete:\n');
     fatal.forEach((msg) => console.error(`  • ${msg}`));
-    console.error('\nContinuing startup with fallbacks so the service remains available.\n');
+    console.error('');
+    process.exit(1);
   }
 }
 
