@@ -1,0 +1,71 @@
+import { request, setToken, clearToken } from './client.js';
+
+export async function login(username, password, mfaCode = '') {
+  const normalizedUsername = String(username || '').trim();
+  const data = await request('/token', {
+    method: 'POST',
+    skipAuthRedirect: true,
+    body: { username: normalizedUsername, password, ...(mfaCode ? { mfaCode } : {}) },
+  }).catch((err) => {
+    // Login 401s are expected (bad credentials / mfa required), not a session
+    // expiry — surface them as normal responses instead of throwing.
+    if (err.status === 401) return err.body || {};
+    throw err;
+  });
+
+  if (data.mfaRequired) return { mfaRequired: true };
+  if (data.access_token) setToken(data.access_token);
+  return data;
+}
+
+export async function logout() {
+  try {
+    await request('/auth/logout', { method: 'POST' });
+  } finally {
+    clearToken();
+  }
+}
+
+export function fetchMfaSetup() {
+  return request('/auth/mfa/setup');
+}
+
+export function enableMfa(code) {
+  return request('/auth/mfa/enable', { method: 'POST', body: { code } });
+}
+
+export function disableMfa(code) {
+  return request('/auth/mfa/disable', { method: 'POST', body: { code } });
+}
+
+export function forgotUsername(email) {
+  return request('/auth/forgot-username', { method: 'POST', skipAuthRedirect: true, body: { email } });
+}
+
+export function requestPasswordReset(email) {
+  return request('/auth/forgot-password/request', { method: 'POST', skipAuthRedirect: true, body: { email } });
+}
+
+export function resetPassword(email, code, password) {
+  return request('/auth/forgot-password/reset', {
+    method: 'POST',
+    skipAuthRedirect: true,
+    body: { email, code, password },
+  });
+}
+
+export function fetchSsoConfig() {
+  return request('/auth/sso/config');
+}
+
+export function fetchMe() {
+  return request('/me');
+}
+
+export function sendHeartbeat() {
+  return request('/heartbeat', { method: 'POST' });
+}
+
+export function updateProfile(payload) {
+  return request('/me/profile', { method: 'PATCH', body: payload });
+}

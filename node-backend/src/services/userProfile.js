@@ -2,7 +2,7 @@ export const OPERATIONAL_TEAM_VALUES = ['Network', 'Developer', 'Hardware'];
 
 export const AUDIENCE_CODE_LABELS = {
   STAFF: 'Operational Staff',
-  TJN: 'CCC Manager',
+  TJN: 'CommandCentre Manager',
   GJN: 'Operational Manager',
   BJN: 'Executive',
   DGSN: 'Stakeholder',
@@ -49,7 +49,7 @@ export function readUserOperationalTeams(user) {
 }
 
 export function getAudienceLabel(code) {
-  return AUDIENCE_CODE_LABELS[code] || 'CCC Staff';
+  return AUDIENCE_CODE_LABELS[code] || 'CommandCentre Staff';
 }
 
 export function isLeadershipAudience(code) {

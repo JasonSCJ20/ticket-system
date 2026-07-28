@@ -40,6 +40,40 @@ const DEFAULT_IT_STAFF = [
   },
 ];
 
+// Fields safe to expose to API clients. Excludes credential/secret-bearing
+// columns such as password_hash, mfaSecret, resetPasswordCode, and
+// resetPasswordCodeExpiresAt (mirrors the explicit-allowlist pattern used
+// for user-facing responses in src/routes/auth.js).
+const toSafeUser = (user) => ({
+  id: user.id,
+  username: user.username,
+  name: user.name,
+  surname: user.surname,
+  department: user.department,
+  operationalTeams: user.operationalTeams,
+  audienceCode: user.audienceCode,
+  jobTitle: user.jobTitle,
+  scjId: user.scjId,
+  email: user.email,
+  telegramNumber: user.telegramNumber,
+  telegramChatId: user.telegramChatId,
+  telegramId: user.telegramId,
+  role: user.role,
+  mfaEnabled: user.mfaEnabled,
+  notifyTelegram: user.notifyTelegram,
+  notifyEmail: user.notifyEmail,
+  lastLoginAt: user.lastLoginAt,
+  lastLoginIp: user.lastLoginIp,
+  lastSeenAt: user.lastSeenAt,
+  lastSeenIp: user.lastSeenIp,
+  lastSeenUserAgent: user.lastSeenUserAgent,
+  isOnline: user.isOnline,
+  lastTelegramDeliveryAt: user.lastTelegramDeliveryAt,
+  lastTelegramDeliveryStatus: user.lastTelegramDeliveryStatus,
+  lastTelegramReadAt: user.lastTelegramReadAt,
+  lastSeenGeo: user.lastSeenGeo,
+});
+
 // Export factory function that takes models as parameter
 export default (models) => {
   // Destructure User model
@@ -53,8 +87,8 @@ export default (models) => {
   router.get('/', async (req, res) => {
     // Fetch all users from database
     const users = await User.findAll();
-    // Return users as JSON
-    res.json(users);
+    // Return users as JSON, excluding credential/secret fields
+    res.json(users.map(toSafeUser));
   });
 
   // POST /api/users - Create IT staff with strict registration fields
@@ -99,8 +133,8 @@ export default (models) => {
       // Create user in database
       try {
         const user = await User.create(data);
-        // Return created user with 201 status
-        res.status(201).json(user);
+        // Return created user with 201 status, excluding credential/secret fields
+        res.status(201).json(toSafeUser(user));
       } catch (err) {
         if (err.name === 'SequelizeUniqueConstraintError') {
           return res.status(409).json({ error: 'User with same email, telegram number, or SCJ ID already exists' });

@@ -79,7 +79,7 @@ export function buildAssignment5W1H(ticket, guidance, context = {}) {
     who: {
       assigneeName: context.assigneeName || 'Assigned IT/Security analyst',
       assigneeScjId: context.assigneeScjId || ticket.assigneeId || null,
-      coordinator: context.coordinator || 'Cybersecurity Command Centre',
+      coordinator: context.coordinator || 'CommandCentre',
       role: context.assigneeRole || null,
     },
     why,

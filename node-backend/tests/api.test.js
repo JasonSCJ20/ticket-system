@@ -1,5 +1,6 @@
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
+import http from 'http';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 
@@ -681,5 +682,206 @@ describe('Scan Queue Throughput', () => {
     expect(job.body).toHaveProperty('id', res.body.jobId);
     expect(job.body).toHaveProperty('mode', 'passive');
     expect(job.body).toHaveProperty('status');
+  });
+});
+
+describe('Asset Enforcement Onboarding', () => {
+  let testServer;
+  let testServerUrl;
+  let assetId;
+
+  beforeAll((done) => {
+    // A real local HTTP target so the backend's canary probe (a genuine
+    // outbound fetch) has something real to reach, rather than mocking fetch.
+    testServer = http.createServer((_req, res) => res.end('ok')).listen(0, '127.0.0.1', () => {
+      testServerUrl = `http://127.0.0.1:${testServer.address().port}`;
+      done();
+    });
+  });
+
+  afterAll((done) => {
+    testServer.close(done);
+  });
+
+  beforeAll(async () => {
+    const asset = await sequelize.models.ApplicationAsset.create({
+      name: 'enforcement-test-asset',
+      baseUrl: 'http://placeholder.invalid',
+    });
+    assetId = asset.id;
+  });
+
+  it('issues an agent key and requires it for heartbeats', async () => {
+    const issued = await request(app)
+      .post(`/api/security/applications/${assetId}/agent-key`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(issued.status).toBe(201);
+    expect(issued.body).toHaveProperty('agentKey');
+    expect(issued.body.agentKey).toMatch(/^cca_/);
+
+    const rejected = await request(app)
+      .post(`/api/security/applications/${assetId}/agent-heartbeat`)
+      .set('x-agent-key', 'wrong-key');
+    expect(rejected.status).toBe(401);
+
+    const accepted = await request(app)
+      .post(`/api/security/applications/${assetId}/agent-heartbeat`)
+      .set('x-agent-key', issued.body.agentKey);
+    expect(accepted.status).toBe(200);
+
+    const asset = await sequelize.models.ApplicationAsset.findByPk(assetId);
+    expect(asset.enforcementModel).toBe('agent');
+    expect(asset.enforcementMode).toBe('shadow');
+    expect(asset.lastHeartbeatAt).not.toBeNull();
+
+    // Point the asset at a real reachable server for the verify step below.
+    await asset.update({ baseUrl: testServerUrl });
+  });
+
+  it('blocks promotion to active mode until verification succeeds, then allows it', async () => {
+    const blocked = await request(app)
+      .patch(`/api/security/applications/${assetId}/mode`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ mode: 'active' });
+    expect(blocked.status).toBe(409);
+
+    const verify = await request(app)
+      .post(`/api/security/applications/${assetId}/verify`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(verify.status).toBe(202);
+    expect(verify.body).toHaveProperty('verificationId');
+    const nonce = verify.body.verificationId;
+
+    // Simulate the agent's own report of having seen the canary probe —
+    // exercises the same endpoint the real @commandcentre/agent package
+    // will call once built. Re-issue a key here since the previous test's
+    // raw key wasn't persisted for reuse across `it` blocks — this also
+    // verifies the agent-report auth path.
+    const reissued = await request(app)
+      .post(`/api/security/applications/${assetId}/agent-key`)
+      .set('Authorization', `Bearer ${token}`);
+
+    const report = await request(app)
+      .post(`/api/security/applications/${assetId}/agent-report`)
+      .set('x-agent-key', reissued.body.agentKey)
+      .send({ type: 'canary_seen', nonce });
+    expect(report.status).toBe(200);
+
+    // Poll once — the canary probe is fired in the background but should
+    // resolve well within the test's default timeout.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const status = await request(app)
+      .get(`/api/security/applications/${assetId}/verify/${nonce}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(status.status).toBe(200);
+    expect(status.body.status).toBe('verified');
+
+    const promoted = await request(app)
+      .patch(`/api/security/applications/${assetId}/mode`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ mode: 'active' });
+    expect(promoted.status).toBe(200);
+    expect(promoted.body).toHaveProperty('mode', 'active');
+  });
+});
+
+describe('Fortress Kill Switch', () => {
+  afterEach(async () => {
+    // Each tier is independent — reset all of them between tests so one
+    // test's activation can't leak into the next.
+    await request(app)
+      .post('/api/security/fortress/kill-switch/unblock-ip')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ip: '::ffff:127.0.0.1' });
+    await request(app)
+      .post('/api/security/fortress/kill-switch/lockdown')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ active: false });
+  });
+
+  it('blocks the requesting IP and the kill-switch path stays reachable to undo it', async () => {
+    const blocked = await request(app)
+      .post('/api/security/fortress/kill-switch/block-ip')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ip: '::ffff:127.0.0.1', reason: 'test' });
+    expect(blocked.status).toBe(200);
+
+    const rejected = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    expect(rejected.status).toBe(403);
+
+    // The management path itself must stay reachable even while our own IP
+    // is blocked — otherwise a self-block has no recovery path.
+    const unblocked = await request(app)
+      .post('/api/security/fortress/kill-switch/unblock-ip')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ ip: '::ffff:127.0.0.1' });
+    expect(unblocked.status).toBe(200);
+
+    const restored = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    expect(restored.status).toBe(200);
+  });
+
+  it('full lockdown blocks ordinary routes but exempts login and the kill-switch path', async () => {
+    const activated = await request(app)
+      .post('/api/security/fortress/kill-switch/lockdown')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ active: true, reason: 'test lockdown' });
+    expect(activated.status).toBe(200);
+    expect(activated.body).toHaveProperty('lockdownActive', true);
+
+    const duringLockdown = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    expect(duringLockdown.status).toBe(503);
+
+    const loginStillWorks = await request(app)
+      .post('/api/token')
+      .send({ username: 'admin_test', password: 'password123' });
+    expect(loginStillWorks.status).toBe(200);
+
+    const deactivated = await request(app)
+      .post('/api/security/fortress/kill-switch/lockdown')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ active: false });
+    expect(deactivated.status).toBe(200);
+    expect(deactivated.body).toHaveProperty('lockdownActive', false);
+
+    const afterLockdown = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    expect(afterLockdown.status).toBe(200);
+  });
+
+  it('revoking all sessions rejects tokens issued before the revoke instant, including the caller\'s own', async () => {
+    const login = await request(app)
+      .post('/api/token')
+      .send({ username: 'admin_test', password: 'password123' });
+    const freshToken = login.body.access_token;
+
+    const revoked = await request(app)
+      .post('/api/security/fortress/kill-switch/revoke-sessions')
+      .set('Authorization', `Bearer ${freshToken}`)
+      .send({ reason: 'test revoke' });
+    expect(revoked.status).toBe(200);
+    expect(revoked.body).toHaveProperty('revoked', true);
+
+    const rejectedOldToken = await request(app).get('/api/tickets').set('Authorization', `Bearer ${freshToken}`);
+    expect(rejectedOldToken.status).toBe(401);
+
+    // JWT `iat` is second-precision, and the revoke check treats a token
+    // minted in the exact same wall-clock second as the revoke as revoked
+    // too (see app.js) — step past that second so this re-login produces an
+    // unambiguously-after token, rather than racing the clock.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const reLogin = await request(app)
+      .post('/api/token')
+      .send({ username: 'admin_test', password: 'password123' });
+    expect(reLogin.status).toBe(200);
+    const worksAfterReLogin = await request(app)
+      .get('/api/tickets')
+      .set('Authorization', `Bearer ${reLogin.body.access_token}`);
+    expect(worksAfterReLogin.status).toBe(200);
+
+    // Restore the shared `token` used by every other describe block in this
+    // file — it was minted before the revoke instant too.
+    token = reLogin.body.access_token;
   });
 });

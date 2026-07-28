@@ -49,7 +49,7 @@ export const CONFIG = {
   // Secret key for JWT signing (change in production)
   SECRET_KEY: process.env.SECRET_KEY || 'PLEASE_CHANGE_ME',
   ACCESS_TOKEN_TTL: process.env.ACCESS_TOKEN_TTL || '15m',
-  MFA_ISSUER: process.env.MFA_ISSUER || 'Cybersecurity Command Centre',
+  MFA_ISSUER: process.env.MFA_ISSUER || 'CommandCentre',
   SSO_ENABLED: String(process.env.SSO_ENABLED || 'false').toLowerCase() === 'true',
   SSO_PROVIDER: process.env.SSO_PROVIDER || 'oidc',
   SSO_ISSUER: process.env.SSO_ISSUER || '',
@@ -99,4 +99,7 @@ export const CONFIG = {
   AUTOMATION_DEVICE_PASSIVE_INTERVAL_MINUTES: Number(process.env.AUTOMATION_DEVICE_PASSIVE_INTERVAL_MINUTES || 20),
   AUTOMATION_DEVICE_IDS_INTERVAL_MINUTES: Number(process.env.AUTOMATION_DEVICE_IDS_INTERVAL_MINUTES || 20),
   AUTOMATION_DATABASE_REVIEW_INTERVAL_MINUTES: Number(process.env.AUTOMATION_DATABASE_REVIEW_INTERVAL_MINUTES || 60),
+  // Encrypts client-granted edge-enforcement credentials (e.g. a Cloudflare
+  // token) at rest. Only required once an asset actually uses the edge model.
+  ASSET_CREDENTIAL_ENCRYPTION_KEY: process.env.ASSET_CREDENTIAL_ENCRYPTION_KEY || '',
 };

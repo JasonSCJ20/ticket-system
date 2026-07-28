@@ -45,6 +45,8 @@ export const initModels = async () => {
   const scanRunRecordModel = (await import('./scanRunRecord.js')).default(sequelize);
   const revokedTokenModel = (await import('./revokedToken.js')).default(sequelize);
   const notificationLedgerModel = (await import('./notificationLedger.js')).default(sequelize);
+  const securityStateModel = (await import('./securityState.js')).default(sequelize);
+  const agentCommandModel = (await import('./agentCommand.js')).default(sequelize);
 
   // Define relationships by SCJ ID instead of numeric PK.
   userModel.hasMany(ticketModel, { foreignKey: 'assigneeId', sourceKey: 'scjId', as: 'assignedTickets', constraints: false });
@@ -66,6 +68,10 @@ export const initModels = async () => {
 
   // Rebuild schema in tests; create-only in normal runtime.
   await sequelize.sync({ force: process.env.NODE_ENV === 'test' });
+
+  // SecurityState is a singleton row (id=1) backing the Fortress kill-switch
+  // tiers — ensure it always exists so callers never have to null-check it.
+  await securityStateModel.findOrCreate({ where: { id: 1 }, defaults: { id: 1 } });
 
   if (process.env.NODE_ENV !== 'test') {
     const queryInterface = sequelize.getQueryInterface();
@@ -149,6 +155,14 @@ export const initModels = async () => {
     await ensureColumn('SecurityFindings', 'remediationRecommendation', { type: DataTypes.TEXT, allowNull: true });
     await ensureColumn('RevokedTokens', 'jti', { type: DataTypes.STRING(64), allowNull: false, unique: true });
     await ensureColumn('RevokedTokens', 'expiresAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('ApplicationAssets', 'enforcementModel', { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'none' });
+    await ensureColumn('ApplicationAssets', 'enforcementMode', { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'shadow' });
+    await ensureColumn('ApplicationAssets', 'verificationStatus', { type: DataTypes.STRING(24), allowNull: false, defaultValue: 'not_configured' });
+    await ensureColumn('ApplicationAssets', 'lastVerifiedAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('ApplicationAssets', 'lastHeartbeatAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('ApplicationAssets', 'agentKeyHash', { type: DataTypes.STRING(128), allowNull: true });
+    await ensureColumn('ApplicationAssets', 'edgeCredentialSecret', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('ApplicationAssets', 'edgeCredentialMeta', { type: DataTypes.JSON, allowNull: true });
 
     const ticketSchema = await queryInterface.describeTable('Tickets');
     if (ticketSchema.assigneeId && ticketSchema.assigneeId.type !== 'VARCHAR(14)') {
@@ -175,6 +189,7 @@ export const initModels = async () => {
     await ensureIndex('NotificationLedgers', ['userId'], 'idx_notification_ledgers_user_id');
     await ensureIndex('NotificationLedgers', ['status'], 'idx_notification_ledgers_status');
     await ensureIndex('NotificationLedgers', ['createdAt'], 'idx_notification_ledgers_created_at');
+    await ensureIndex('AgentCommands', ['applicationAssetId', 'status'], 'idx_agent_commands_asset_status');
   }
   // Return initialized models
   return {
@@ -195,5 +210,7 @@ export const initModels = async () => {
     scanRunRecordModel,
     revokedTokenModel,
     notificationLedgerModel,
+    securityStateModel,
+    agentCommandModel,
   };
 };

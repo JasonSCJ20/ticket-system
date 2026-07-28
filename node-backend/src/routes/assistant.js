@@ -46,7 +46,7 @@ function summarizeTicket(ticket) {
   const guidance = buildAssignmentGuidance(ticket);
   const fiveW1H = buildAssignment5W1H(ticket, guidance, {
     assigneeScjId: ticket.assigneeId || null,
-    coordinator: 'Cybersecurity Command Centre',
+    coordinator: 'CommandCentre',
   });
 
   return {

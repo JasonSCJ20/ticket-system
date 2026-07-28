@@ -1,0 +1,68 @@
+:root {
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius: 12px;
+}
+
+[data-theme="onyx"] {
+  --bg: #0a0a0b;
+  --surface: #131314;
+  --surface-2: #1a1a1c;
+  --border: #262628;
+  --text: #f2f1ee;
+  --text-muted: #8f8d88;
+  --accent: #e0954a;
+  --accent-soft: rgba(224, 149, 74, 0.14);
+  --success: #6fae6f;
+  --success-soft: rgba(111, 174, 111, 0.14);
+  --warning: #e0954a;
+  --warning-soft: rgba(224, 149, 74, 0.14);
+  --danger: #c96a5a;
+  --danger-soft: rgba(201, 106, 90, 0.14);
+  --pad: 20px;
+  --body-size: 14.5px;
+}
+
+[data-theme="daylight"] {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #eef0f3;
+  --border: #e1e4e9;
+  --text: #1a2233;
+  --text-muted: #6b7280;
+  --accent: #3454d1;
+  --accent-soft: rgba(52, 84, 209, 0.08);
+  --success: #1f9d55;
+  --success-soft: rgba(31, 157, 85, 0.1);
+  --warning: #c98a1a;
+  --warning-soft: rgba(201, 138, 26, 0.1);
+  --danger: #d1453d;
+  --danger-soft: rgba(209, 69, 61, 0.1);
+  --pad: 16px;
+  --body-size: 13.5px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--body-size);
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+  font-size: inherit;
+}

@@ -30,7 +30,7 @@ export async function sendMonthlyReport(Ticket) {
   // Get summary data
   const summary = await monthlySummary(new Date(), Ticket);
   // Format report text in Markdown
-  const text = `*Monthly Cybersecurity Ticket Report*\nTotal tickets: ${summary.total}\nCreated last 30 days: ${summary.created}\nClosed total: ${summary.closed}`;
+  const text = `*Monthly CommandCentre Report*\nTotal tickets: ${summary.total}\nCreated last 30 days: ${summary.created}\nClosed total: ${summary.closed}`;
   // Send message to configured chat
   sendTelegramMessage(CONFIG.MONTHLY_REPORT_CHAT_ID, text, { parse_mode: 'Markdown' });
 }

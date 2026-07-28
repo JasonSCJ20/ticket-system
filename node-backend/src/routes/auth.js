@@ -229,8 +229,8 @@ export default function authRouteFactory({
       if (user.email) {
         await sendEmailNotification(
           user.email,
-          'CCC Password Reset Code',
-          `Your Cybersecurity Command Centre password reset code is: ${resetCode}. It expires at ${expires.toISOString()}.`,
+          'CommandCentre Password Reset Code',
+          `Your CommandCentre password reset code is: ${resetCode}. It expires at ${expires.toISOString()}.`,
         ).catch(() => {});
       }
 
@@ -474,7 +474,7 @@ export default function authRouteFactory({
     const user = await userModel.findByPk(req.user.sub);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const issuer = config.MFA_ISSUER || 'Cybersecurity Command Centre';
+    const issuer = config.MFA_ISSUER || 'CommandCentre';
     const secret = speakeasy.generateSecret({
       name: `${issuer}:${user.username || user.name}`,
       issuer,

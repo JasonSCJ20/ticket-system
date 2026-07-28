@@ -79,10 +79,16 @@ export default (models, notify) => {
       if (req.query.priority) where.priority = req.query.priority;
       if (req.query.lifecycleStage) where.lifecycleStage = req.query.lifecycleStage;
 
-    // Fetch all tickets including assignee relationship
+    // Fetch all tickets including assignee relationship, excluding
+    // credential/secret-bearing columns (mirrors the allowlist convention
+    // used for user-facing responses in src/routes/users.js and auth.js)
       const tickets = await Ticket.findAll({
         where,
-        include: [{ model: User, as: 'assignee' }],
+        include: [{
+          model: User,
+          as: 'assignee',
+          attributes: { exclude: ['password_hash', 'mfaSecret', 'resetPasswordCode', 'resetPasswordCodeExpiresAt'] },
+        }],
         order: [['createdAt', 'DESC']],
       });
     // Return tickets as JSON

@@ -30,6 +30,9 @@ import usersRouteFactory from './routes/users.js';
 import ticketsRouteFactory from './routes/tickets.js';
 import securityRouteFactory from './routes/security.js';
 import securityConnectorsRouteFactory from './routes/securityConnectors.js';
+import assetEnforcementRouteFactory from './routes/assetEnforcement.js';
+import fortressKillSwitchRouteFactory, { checkRequestAgainstSecurityState } from './routes/fortressKillSwitch.js';
+import { initSecurityStateCache, getSecurityStateCache } from './services/securityStateCache.js';
 import assistantRouteFactory from './routes/assistant.js';
 import authRouteFactory from './routes/auth.js';
 import reportsRouteFactory from './routes/reports.js';
@@ -186,6 +189,15 @@ app.use('/api', (_req, res, next) => {
   next();
 });
 
+// Fortress kill-switch enforcement — IP blocks and full lockdown apply
+// before anything else runs (including auth), reading from an in-memory
+// cache refreshed by src/services/securityStateCache.js so this never adds
+// a database round trip to every request.
+app.use('/api', (req, res, next) => {
+  if (!checkRequestAgainstSecurityState(req, res)) return;
+  next();
+});
+
 // Capture API timing metrics for percentile-based performance governance.
 app.use('/api', (req, res, next) => {
   const start = process.hrtime.bigint();
@@ -279,6 +291,23 @@ async function authMiddleware(req, res, next) {
     if (payload?.jti && await isTokenRevoked(payload.jti)) {
       return res.status(401).json({ error: 'Token has been revoked' });
     }
+    // Fortress "kill everything now": any token issued before a global
+    // revoke instant is rejected, without needing to enumerate individual
+    // sessions. Deliberately includes the requester's own token too.
+    // JWT `iat` is second-precision (per spec) — a token minted in the exact
+    // same wall-clock second as the revoke instant can't be reliably ordered
+    // against it. Resolve that ambiguity toward more security, not less:
+    // <= treats a same-second token as revoked too. Practical effect is a
+    // token minted in the same second as a revoke may need one extra
+    // second before a fresh login is accepted — a reasonable tradeoff
+    // against ever accepting a token that should have been killed.
+    const globalRevokeAfter = getSecurityStateCache().globalRevokeAfter;
+    if (globalRevokeAfter && payload?.iat) {
+      const revokeAfterSeconds = Math.floor(new Date(globalRevokeAfter).getTime() / 1000);
+      if (payload.iat <= revokeAfterSeconds) {
+        return res.status(401).json({ error: 'Your session was revoked. Please sign in again.' });
+      }
+    }
     // Attach user info to request
     req.user = payload;
     req.token = token;
@@ -357,7 +386,11 @@ async function setup() {
     scanRunRecordModel,
     revokedTokenModel,
     notificationLedgerModel,
+    agentCommandModel,
+    securityStateModel,
   } = await initModels();
+
+  initSecurityStateCache(securityStateModel);
 
   isTokenRevoked = async (jti) => {
     if (!jti) return false;
@@ -494,11 +527,11 @@ async function setup() {
 
   function buildLeadershipAssignmentMessage(ticket, guidance, assignee) {
     const briefing = buildAssignment5W1H(ticket, guidance, {
-      assigneeName: `${assignee?.name || ''} ${assignee?.surname || ''}`.trim() || assignee?.name || 'Assigned CCC staff member',
+      assigneeName: `${assignee?.name || ''} ${assignee?.surname || ''}`.trim() || assignee?.name || 'Assigned CommandCentre staff member',
       assigneeScjId: assignee?.scjId || ticket.assigneeId || null,
       assigneeRole: assignee?.role || null,
       impactedServices: ticket.impactedServices || null,
-      coordinator: 'Cybersecurity Command Centre',
+      coordinator: 'CommandCentre',
     });
 
     return [
@@ -509,7 +542,7 @@ async function setup() {
       `When: ${briefing.when.assignedAt}${briefing.when.slaDueAt ? ` | SLA due ${briefing.when.slaDueAt}` : ''}`,
       `Who: ${briefing.who.assigneeName}${briefing.who.assigneeScjId ? ` (${briefing.who.assigneeScjId})` : ''}`,
       `Why: ${ticket.executiveSummary || guidance.issueSummary}`,
-      `How: ${guidance.possibleSolutions?.[0] || 'Coordinate triage, containment, and recovery with the assigned CCC staff member.'}`,
+      `How: ${guidance.possibleSolutions?.[0] || 'Coordinate triage, containment, and recovery with the assigned CommandCentre staff member.'}`,
       `Business impact: ${ticket.executiveSummary || 'Operational service disruption or cyber risk requires management visibility and stakeholder escalation.'}`,
     ].join('\n');
   }
@@ -532,7 +565,7 @@ async function setup() {
       `What: ${finding.title || 'Security alert requiring attention'}`,
       `Where: ${finding.affectedAssetRef || finding.affectedAssetType || 'Command Centre monitored environment'}`,
       `When: ${new Date(finding.detectedAt || finding.createdAt || Date.now()).toISOString()}`,
-      `Who: Impacted teams are ${impactedTeams.join(', ')} under CCC coordination.`,
+      `Who: Impacted teams are ${impactedTeams.join(', ')} under CommandCentre coordination.`,
       `Why: ${finding.executiveSummary || finding.description || 'Monitoring has detected a risk that requires visibility and coordinated response.'}`,
       `How: ${finding.remediationRecommendation || 'Coordinate immediate triage, validate impact, and prepare escalation updates for stakeholders.'}`,
       `Business impact: ${finding.businessImpact || 'Operational or service risk exists and should be monitored closely.'}`,
@@ -599,7 +632,7 @@ async function setup() {
     if (assignee.notifyEmail && assignee.email) {
       await sendEmailNotification(
         assignee.email,
-        `Cybersecurity Ticket ${type.toUpperCase()} - #${ticket.id}`,
+        `CommandCentre Ticket ${type.toUpperCase()} - #${ticket.id}`,
         text,
       );
     }
@@ -617,7 +650,7 @@ async function setup() {
       assigneeScjId: assignee.scjId || ticket.assigneeId || null,
       assigneeRole: assignee.role || null,
       impactedServices: ticket.impactedServices || null,
-      coordinator: 'Cybersecurity Command Centre',
+      coordinator: 'CommandCentre',
     });
     const leadershipMessage = buildLeadershipAssignmentMessage(ticket, guidance, assignee);
 
@@ -686,7 +719,7 @@ async function setup() {
     if (CONFIG.MANAGER_EMAIL) {
       await sendEmailNotification(
         CONFIG.MANAGER_EMAIL,
-        `CCC Manager Resolution Report - Ticket #${ticket.id}`,
+        `CommandCentre Manager Resolution Report - Ticket #${ticket.id}`,
         report.reportText,
       );
       deliveredToManager = true;
@@ -1104,6 +1137,32 @@ async function setup() {
         ConnectorReceipt: connectorReceiptModel,
       },
       notifyTicket: notify,
+    }),
+  );
+
+  // Not mounted under global authMiddleware: the agent-heartbeat/agent-report
+  // routes authenticate via a per-asset agent key instead of a JWT, so
+  // authMiddleware is applied selectively inside the factory for the
+  // operator-facing routes only.
+  app.use(
+    '/api/security/applications',
+    assetEnforcementRouteFactory({
+      models: {
+        ApplicationAsset: applicationAssetModel,
+        AuditLog: auditLogModel,
+        AgentCommand: agentCommandModel,
+        SecurityFinding: securityFindingModel,
+      },
+      authMiddleware,
+      notifyTicket: notify,
+    }),
+  );
+
+  app.use(
+    '/api/security/fortress/kill-switch',
+    fortressKillSwitchRouteFactory({
+      models: { SecurityState: securityStateModel, AuditLog: auditLogModel },
+      authMiddleware,
     }),
   );
 
