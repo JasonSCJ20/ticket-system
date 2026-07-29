@@ -786,6 +786,122 @@ describe('Asset Enforcement Onboarding', () => {
   });
 });
 
+describe('Edge Enforcement (Cloudflare)', () => {
+  // A real local HTTP server standing in for Cloudflare's API, shaped like
+  // the real thing — the backend's edge-enforcement service makes genuine
+  // outbound HTTP calls against it (via CLOUDFLARE_EDGE_API_BASE_URL), not a
+  // mocked fetch. Only the "who's on the other end" changes from production.
+  let cfServer;
+  let cfServerUrl;
+  let assetId;
+  const rules = new Map();
+  let nextRuleId = 1;
+
+  beforeAll((done) => {
+    cfServer = http
+      .createServer((req, res) => {
+        const send = (status, body) => {
+          res.writeHead(status, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(body));
+        };
+        if (req.method === 'GET' && req.url === '/zones/zone-good') {
+          return send(200, { success: true, result: { name: 'client-example.com' } });
+        }
+        if (req.method === 'GET' && req.url === '/zones/zone-bad') {
+          return send(403, { success: false, errors: [{ message: 'Invalid API token for this zone' }] });
+        }
+        if (req.method === 'POST' && req.url === '/zones/zone-good/firewall/access_rules/rules') {
+          const id = `rule-${nextRuleId++}`;
+          rules.set(id, true);
+          return send(200, { success: true, result: { id } });
+        }
+        const deleteMatch = req.url.match(/^\/zones\/zone-good\/firewall\/access_rules\/rules\/(.+)$/);
+        if (req.method === 'DELETE' && deleteMatch) {
+          rules.delete(deleteMatch[1]);
+          return send(200, { success: true, result: { id: deleteMatch[1] } });
+        }
+        send(404, { success: false, errors: [{ message: 'not found in mock' }] });
+      })
+      .listen(0, '127.0.0.1', () => {
+        cfServerUrl = `http://127.0.0.1:${cfServer.address().port}`;
+        process.env.CLOUDFLARE_EDGE_API_BASE_URL = cfServerUrl;
+        done();
+      });
+  });
+
+  afterAll((done) => {
+    delete process.env.CLOUDFLARE_EDGE_API_BASE_URL;
+    cfServer.close(done);
+  });
+
+  beforeAll(async () => {
+    const asset = await sequelize.models.ApplicationAsset.create({
+      name: 'edge-enforcement-test-asset',
+      baseUrl: 'http://placeholder.invalid',
+    });
+    assetId = asset.id;
+  });
+
+  it('rejects verification for a token/zone the provider does not recognize', async () => {
+    const set = await request(app)
+      .post(`/api/security/applications/${assetId}/edge-credential`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ token: 'cf-token-placeholder', meta: { zoneId: 'zone-bad' } });
+    expect(set.status).toBe(201);
+
+    const verify = await request(app)
+      .post(`/api/security/applications/${assetId}/verify`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(verify.status).toBe(200);
+    expect(verify.body.status).toBe('failed');
+
+    const asset = await sequelize.models.ApplicationAsset.findByPk(assetId);
+    expect(asset.verificationStatus).toBe('failed');
+  });
+
+  it('verifies a real zone, promotes to active, then blocks and unblocks an IP against the real provider API', async () => {
+    await request(app)
+      .post(`/api/security/applications/${assetId}/edge-credential`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ token: 'cf-token-placeholder', meta: { zoneId: 'zone-good' } });
+
+    const verify = await request(app)
+      .post(`/api/security/applications/${assetId}/verify`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(verify.status).toBe(200);
+    expect(verify.body.status).toBe('verified');
+
+    const promoted = await request(app)
+      .patch(`/api/security/applications/${assetId}/mode`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ mode: 'active' });
+    expect(promoted.status).toBe(200);
+
+    const rejectedSession = await request(app)
+      .post(`/api/security/applications/${assetId}/commands`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ action: 'block_session', target: 'sess-123' });
+    expect(rejectedSession.status).toBe(400);
+
+    const blocked = await request(app)
+      .post(`/api/security/applications/${assetId}/commands`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ action: 'block_ip', target: '203.0.113.9', reason: 'automated test block' });
+    expect(blocked.status).toBe(201);
+    expect(blocked.body.status).toBe('acknowledged');
+    expect(blocked.body.externalRef).toMatch(/^rule-/);
+    expect(rules.has(blocked.body.externalRef)).toBe(true);
+
+    const unblocked = await request(app)
+      .post(`/api/security/applications/${assetId}/commands`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ action: 'unblock_ip', target: '203.0.113.9' });
+    expect(unblocked.status).toBe(201);
+    expect(unblocked.body.status).toBe('acknowledged');
+    expect(rules.has(blocked.body.externalRef)).toBe(false);
+  });
+});
+
 describe('Fortress Kill Switch', () => {
   afterEach(async () => {
     // Each tier is independent — reset all of them between tests so one

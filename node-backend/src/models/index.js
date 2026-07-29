@@ -97,6 +97,15 @@ export const initModels = async () => {
       }
     };
 
+    // Postgres ENUM types created by sequelize.sync() at table-creation time
+    // aren't touched by addColumn-based migrations — adding a new valid value
+    // to an already-live enum needs an explicit ALTER TYPE. Safe and additive
+    // (Postgres 12+ supports IF NOT EXISTS here; never removes an existing
+    // value, never rewrites the table).
+    const ensureEnumValue = async (enumTypeName, value) => {
+      await sequelize.query(`ALTER TYPE "${enumTypeName}" ADD VALUE IF NOT EXISTS '${value}'`);
+    };
+
     await ensureColumn('Users', 'username', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'surname', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'department', { type: DataTypes.STRING, allowNull: true });
@@ -163,6 +172,9 @@ export const initModels = async () => {
     await ensureColumn('ApplicationAssets', 'agentKeyHash', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('ApplicationAssets', 'edgeCredentialSecret', { type: DataTypes.TEXT, allowNull: true });
     await ensureColumn('ApplicationAssets', 'edgeCredentialMeta', { type: DataTypes.JSON, allowNull: true });
+    await ensureColumn('AgentCommands', 'externalRef', { type: DataTypes.STRING(255), allowNull: true });
+    await ensureColumn('AgentCommands', 'failureReason', { type: DataTypes.STRING(500), allowNull: true });
+    await ensureEnumValue('enum_AgentCommands_status', 'failed');
 
     const ticketSchema = await queryInterface.describeTable('Tickets');
     if (ticketSchema.assigneeId && ticketSchema.assigneeId.type !== 'VARCHAR(14)') {

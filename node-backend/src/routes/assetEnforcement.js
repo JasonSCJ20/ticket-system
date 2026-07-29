@@ -1,8 +1,9 @@
 import express from 'express';
 import crypto from 'crypto';
 import { param, body, validationResult } from 'express-validator';
-import { generateAgentKey, hashAgentKey, verifyAgentKey, encryptAssetCredential } from '../services/assetSecrets.js';
+import { generateAgentKey, hashAgentKey, verifyAgentKey, encryptAssetCredential, decryptAssetCredential } from '../services/assetSecrets.js';
 import { ingestFinding } from '../services/securityEngine.js';
+import { verifyEdgeCredential, pushIpBlockRule, removeIpBlockRule } from '../services/edgeEnforcement.js';
 
 const router = express.Router();
 
@@ -77,7 +78,15 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     return res.status(201).json({ agentKey: rawKey, warning: 'This key will not be shown again. Store it securely.' });
   });
 
-  router.post('/:id/edge-credential', authMiddleware, adminOnly, param('id').isInt(), body('token').isString().trim().isLength({ min: 8, max: 2000 }), body('meta').optional().isObject(), async (req, res) => {
+  router.post(
+    '/:id/edge-credential',
+    authMiddleware,
+    adminOnly,
+    param('id').isInt(),
+    body('token').isString().trim().isLength({ min: 8, max: 2000 }),
+    body('meta').isObject().withMessage('meta is required'),
+    body('meta.zoneId').isString().trim().isLength({ min: 1 }).withMessage('meta.zoneId is required to know which Cloudflare zone this credential controls'),
+    async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
@@ -89,7 +98,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       enforcementMode: 'shadow',
       verificationStatus: 'pending',
       edgeCredentialSecret: encryptAssetCredential(req.body.token),
-      edgeCredentialMeta: req.body.meta || null,
+      edgeCredentialMeta: req.body.meta,
       lastVerifiedAt: null,
     });
 
@@ -112,8 +121,46 @@ export default ({ models, authMiddleware, notifyTicket }) => {
 
     const asset = await ApplicationAsset.findByPk(req.params.id);
     if (!asset) return res.status(404).json({ error: 'Asset not found' });
+
+    if (asset.enforcementModel === 'edge') {
+      // No agent to fire a probe and wait for — we can just ask Cloudflare
+      // directly whether this token actually controls this zone, so the
+      // result is known synchronously instead of needing a poll.
+      if (!asset.edgeCredentialSecret || !asset.edgeCredentialMeta?.zoneId) {
+        return res.status(409).json({ error: 'No edge credential configured for this asset yet.' });
+      }
+      const token = decryptAssetCredential(asset.edgeCredentialSecret);
+      const result = await verifyEdgeCredential(token, asset.edgeCredentialMeta.zoneId);
+
+      if (!result.verified) {
+        await asset.update({ verificationStatus: 'failed' });
+        await AuditLog.create({
+          entityType: 'application_asset',
+          entityId: String(asset.id),
+          actor: req.user?.username || 'unknown',
+          actorRole: req.user?.role || null,
+          action: 'asset.verification_failed',
+          ipAddress: req.ip,
+          details: JSON.stringify({ assetId: asset.id, reason: result.reason }),
+        });
+        return res.status(200).json({ status: 'failed', reason: result.reason });
+      }
+
+      await asset.update({ verificationStatus: 'verified', lastVerifiedAt: new Date() });
+      await AuditLog.create({
+        entityType: 'application_asset',
+        entityId: String(asset.id),
+        actor: req.user?.username || 'unknown',
+        actorRole: req.user?.role || null,
+        action: 'asset.verification_succeeded',
+        ipAddress: req.ip,
+        details: JSON.stringify({ assetId: asset.id, zoneName: result.zoneName }),
+      });
+      return res.status(200).json({ status: 'verified', verifiedAt: asset.lastVerifiedAt });
+    }
+
     if (asset.enforcementModel !== 'agent') {
-      return res.status(400).json({ error: 'Live canary verification is only implemented for the embedded-agent model right now.' });
+      return res.status(400).json({ error: 'Asset has no enforcement model configured yet — issue an agent key or set an edge credential first.' });
     }
     if (!asset.lastHeartbeatAt) {
       return res.status(409).json({ error: 'No agent heartbeat received yet. Confirm the agent is installed and running before verifying.' });
@@ -282,6 +329,12 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       const asset = await ApplicationAsset.findByPk(req.params.id);
       if (!asset) return res.status(404).json({ error: 'Asset not found' });
 
+      if (asset.enforcementModel === 'edge' && req.body.action === 'block_session') {
+        return res.status(400).json({
+          error: 'Session-level blocking is not available for edge enforcement — Cloudflare acts on IP/network traffic, not application sessions. Use the embedded agent model for session-level blocks.',
+        });
+      }
+
       const command = await AgentCommand.create({
         applicationAssetId: asset.id,
         action: req.body.action,
@@ -298,6 +351,41 @@ export default ({ models, authMiddleware, notifyTicket }) => {
         ipAddress: req.ip,
         details: JSON.stringify({ target: req.body.target, reason: req.body.reason || null }),
       });
+
+      // Edge-model assets have no agent polling for commands, so execute
+      // right here, synchronously, against the real Cloudflare API — the
+      // caller learns immediately whether the block actually took effect,
+      // rather than a command silently sitting in 'pending' forever.
+      if (asset.enforcementModel === 'edge') {
+        if (!asset.edgeCredentialSecret || !asset.edgeCredentialMeta?.zoneId) {
+          await command.update({ status: 'failed', failureReason: 'No edge credential configured for this asset.' });
+          return res.status(409).json(command);
+        }
+
+        const token = decryptAssetCredential(asset.edgeCredentialSecret);
+        const zoneId = asset.edgeCredentialMeta.zoneId;
+
+        try {
+          if (req.body.action === 'block_ip') {
+            const ruleId = await pushIpBlockRule(token, zoneId, req.body.target, req.body.reason);
+            await command.update({ status: 'acknowledged', acknowledgedAt: new Date(), externalRef: ruleId });
+          } else if (req.body.action === 'unblock_ip') {
+            const blockCommand = await AgentCommand.findOne({
+              where: { applicationAssetId: asset.id, action: 'block_ip', target: req.body.target, status: 'acknowledged' },
+              order: [['createdAt', 'DESC']],
+            });
+            if (!blockCommand?.externalRef) {
+              await command.update({ status: 'failed', failureReason: `No active block found for ${req.body.target} to remove.` });
+              return res.status(409).json(command);
+            }
+            await removeIpBlockRule(token, zoneId, blockCommand.externalRef);
+            await command.update({ status: 'acknowledged', acknowledgedAt: new Date(), externalRef: blockCommand.externalRef });
+          }
+        } catch (err) {
+          await command.update({ status: 'failed', failureReason: err.message });
+          return res.status(502).json(command);
+        }
+      }
 
       return res.status(201).json(command);
     },

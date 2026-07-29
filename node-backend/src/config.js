@@ -26,6 +26,9 @@ function enforceProductionSecrets() {
   if (!process.env.DATABASE_URL || process.env.DATABASE_URL.startsWith('sqlite')) {
     fatal.push('DATABASE_URL must point to a PostgreSQL or MySQL instance in production (not SQLite).');
   }
+  if (!process.env.ASSET_CREDENTIAL_ENCRYPTION_KEY || process.env.ASSET_CREDENTIAL_ENCRYPTION_KEY.length < 32) {
+    fatal.push('ASSET_CREDENTIAL_ENCRYPTION_KEY must be set to a 32+ byte value in production — without it, storing an edge credential for any asset throws an uncaught error instead of returning a clean response.');
+  }
   if (fatal.length > 0) {
     console.error('\n[FATAL] Refusing to start: production configuration is insecure or incomplete:\n');
     fatal.forEach((msg) => console.error(`  • ${msg}`));

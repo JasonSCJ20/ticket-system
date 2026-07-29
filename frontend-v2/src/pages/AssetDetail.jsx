@@ -41,6 +41,7 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
   const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [issuedKey, setIssuedKey] = useState(null);
   const [edgeToken, setEdgeToken] = useState('');
+  const [edgeZoneId, setEdgeZoneId] = useState('');
   const [verifyState, setVerifyState] = useState(null); // 'pending' | 'verified' | 'timeout' | 'unsupported'
   const [cmdAction, setCmdAction] = useState('block_ip');
   const [cmdTarget, setCmdTarget] = useState('');
@@ -65,12 +66,13 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
   };
 
   const handleSetEdgeCredential = async () => {
-    if (!edgeToken.trim()) return;
+    if (!edgeToken.trim() || !edgeZoneId.trim()) return;
     setBusy(true);
     clear();
     try {
-      await setEdgeCredential(asset.id, edgeToken.trim());
+      await setEdgeCredential(asset.id, edgeToken.trim(), { zoneId: edgeZoneId.trim() });
       setEdgeToken('');
+      setEdgeZoneId('');
       notifySuccess('Edge credential stored (encrypted). Asset is in shadow mode until verified.');
       onChanged();
     } catch (err) {
@@ -84,6 +86,30 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
     setBusy(true);
     clear();
     setVerifyState('pending');
+
+    // Edge model has no agent to fire a probe at and wait for — CommandCentre
+    // asks the provider (Cloudflare) directly whether this token controls
+    // this zone, so the result comes back synchronously, no polling needed.
+    if (asset.enforcementModel === 'edge') {
+      try {
+        const result = await startVerification(asset.id);
+        if (result.status === 'verified') {
+          setVerifyState('verified');
+          notifySuccess('Verified — CommandCentre confirmed this token actually controls the zone. You can now promote to active mode.');
+          onChanged();
+        } else {
+          setVerifyState('timeout');
+          notifyError({ message: result.reason || 'Cloudflare rejected this credential.' });
+        }
+      } catch (err) {
+        setVerifyState('timeout');
+        notifyError(err, 'Failed to verify this edge credential.');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     try {
       const { verificationId } = await startVerification(asset.id);
       let attempts = 0;
@@ -144,12 +170,20 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
     setBusy(true);
     clear();
     try {
-      await queueAgentCommand(asset.id, cmdAction, cmdTarget.trim(), cmdReason.trim() || undefined);
-      notifySuccess('Command queued — the agent will pick it up on its next poll.');
+      const command = await queueAgentCommand(asset.id, cmdAction, cmdTarget.trim(), cmdReason.trim() || undefined);
+      if (asset.enforcementModel === 'edge') {
+        if (command.status === 'acknowledged') {
+          notifySuccess(`Done — Cloudflare confirmed the ${cmdAction} action took effect immediately.`);
+        } else {
+          notifyError({ message: command.failureReason || 'Cloudflare did not confirm this action.' });
+        }
+      } else {
+        notifySuccess('Command queued — the agent will pick it up on its next poll.');
+      }
       setCmdTarget('');
       setCmdReason('');
     } catch (err) {
-      notifyError(err, 'Failed to queue that command.');
+      notifyError(err, 'Failed to execute that command.');
     } finally {
       setBusy(false);
     }
@@ -195,11 +229,17 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
               <input
                 value={edgeToken}
                 onChange={(e) => setEdgeToken(e.target.value)}
-                placeholder="Scoped API token"
+                placeholder="Scoped Cloudflare API token"
                 type="password"
                 style={inputStyle}
               />
-              <button disabled={busy} onClick={handleSetEdgeCredential} style={btnStyle('var(--accent)')}>
+              <input
+                value={edgeZoneId}
+                onChange={(e) => setEdgeZoneId(e.target.value)}
+                placeholder="Cloudflare zone ID"
+                style={inputStyle}
+              />
+              <button disabled={busy || !edgeToken.trim() || !edgeZoneId.trim()} onClick={handleSetEdgeCredential} style={btnStyle('var(--accent)')}>
                 Store credential
               </button>
             </div>
@@ -245,7 +285,7 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
             <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
               <select value={cmdAction} onChange={(e) => setCmdAction(e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: '0 0 auto' }}>
                 <option value="block_ip">block_ip</option>
-                <option value="block_session">block_session</option>
+                {asset.enforcementModel !== 'edge' && <option value="block_session">block_session</option>}
                 <option value="unblock_ip">unblock_ip</option>
               </select>
               <input
