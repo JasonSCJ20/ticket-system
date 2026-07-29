@@ -32,10 +32,14 @@ jobs:
           cd node-backend
           npm test
 
-      - name: Audit backend dependencies (high+)
+      # --omit=dev: only the dependencies that actually ship to production
+      # gate the build. Dev-only tooling (Jest and its transitive deps, etc.)
+      # never runs in production and floods this check with irrelevant noise
+      # otherwise — track those separately, don't block every commit on them.
+      - name: Audit backend dependencies (production, high+)
         run: |
           cd node-backend
-          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=high
 
   frontend:
     runs-on: ubuntu-latest
@@ -60,6 +64,11 @@ jobs:
         run: |
           cd frontend-v2
           npm run build
+
+      - name: Audit frontend dependencies (production, high+)
+        run: |
+          cd frontend-v2
+          npm audit --omit=dev --audit-level=high
 
   agent:
     runs-on: ubuntu-latest
@@ -94,3 +103,8 @@ jobs:
         run: |
           cd agent
           npm test
+
+      - name: Audit agent dependencies (production, high+)
+        run: |
+          cd agent
+          npm audit --omit=dev --audit-level=high
