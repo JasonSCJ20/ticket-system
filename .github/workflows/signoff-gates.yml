@@ -8,7 +8,60 @@ on:
     branches: [ main ]
 
 jobs:
-  signoff-quality:
+  backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: node-backend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          cd node-backend
+          npm ci
+
+      - name: Run backend tests
+        run: |
+          cd node-backend
+          npm test
+
+      - name: Audit backend dependencies (high+)
+        run: |
+          cd node-backend
+          npm audit --audit-level=high
+
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend-v2/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend-v2
+          npm ci
+
+      - name: Build frontend
+        run: |
+          cd frontend-v2
+          npm run build
+
+  agent:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,30 +74,23 @@ jobs:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: |
+            agent/package-lock.json
             node-backend/package-lock.json
-            frontend/package-lock.json
 
-      - name: Install backend dependencies
+      # The agent's tests import node-backend's app.js/models directly to run
+      # a real backend instance against the real agent middleware — so both
+      # packages' dependencies must be installed, not just the agent's own.
+      - name: Install node-backend dependencies
         run: |
           cd node-backend
           npm ci
 
-      - name: Run backend tests
+      - name: Install agent dependencies
         run: |
-          cd node-backend
+          cd agent
+          npm ci
+
+      - name: Run agent tests
+        run: |
+          cd agent
           npm test
-
-      - name: Install frontend dependencies
-        run: |
-          cd frontend
-          npm ci
-
-      - name: Build frontend
-        run: |
-          cd frontend
-          npm run build
-
-      - name: Audit backend dependencies (high+)
-        run: |
-          cd node-backend
-          npm audit --audit-level=high
