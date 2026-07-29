@@ -8,7 +8,7 @@ import {
   normalizeOperationalTeams,
 } from '../services/userProfile.js';
 
-const NHNE_EMAIL_DOMAIN = '@nhne.org.za';
+const ALLOWED_REGISTRATION_EMAIL_DOMAIN = '@scratchsolidsolutions.org';
 const SCJ_ID_EXAMPLE = '00000000-00000';
 
 function normalizePersonName(value = '') {
@@ -19,8 +19,8 @@ function buildUsername(name, surname) {
   return `${normalizePersonName(name)} ${normalizePersonName(surname)}`.trim();
 }
 
-function isNhneEmail(email = '') {
-  return email.trim().toLowerCase().endsWith(NHNE_EMAIL_DOMAIN);
+function isAllowedRegistrationEmail(email = '') {
+  return email.trim().toLowerCase().endsWith(ALLOWED_REGISTRATION_EMAIL_DOMAIN);
 }
 
 function isConfiguredAdminUsername(username = '', config = {}) {
@@ -99,8 +99,8 @@ export default function authRouteFactory({
         return res.status(422).json({ error: 'Username must match the provided name and surname' });
       }
 
-      if (!isNhneEmail(email)) {
-        return res.status(422).json({ error: 'Email address must use the @nhne.org.za domain' });
+      if (!isAllowedRegistrationEmail(email)) {
+        return res.status(422).json({ error: 'Email address must use the @scratchsolidsolutions.org domain' });
       }
 
       if (!isValidScjId(scjId)) {
@@ -170,11 +170,58 @@ export default function authRouteFactory({
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
-      const user = await userModel.findOne({ where: { email: req.body.email } });
+      const email = req.body.email;
+      const requestGate = await consumeAuthAttempt('username_request', email, {
+        limit: 5,
+        windowMs: 15 * 60 * 1000,
+        lockMs: 15 * 60 * 1000,
+      });
+      if (!requestGate.allowed) {
+        await writePublicAudit(req, {
+          entityType: 'auth_recovery',
+          entityId: email,
+          action: 'auth.username_request_rate_limited',
+          details: JSON.stringify({ retryAfterSec: requestGate.retryAfterSec }),
+        });
+        return res.status(429).json({
+          error: 'Too many username recovery requests. Try again later.',
+          retryAfterSec: requestGate.retryAfterSec,
+        });
+      }
+
+      // Always return the same generic response regardless of whether the
+      // account exists, and never put the username itself in the API
+      // response — both would let anyone enumerate which emails have
+      // accounts (and learn the username directly) just by calling this
+      // endpoint. The username only ever goes to the account's own inbox.
+      const user = await userModel.findOne({ where: { email } });
+      if (user) {
+        const username = user.username || user.name;
+        if (user.email) {
+          await sendEmailNotification(
+            user.email,
+            'CommandCentre Username Recovery',
+            `Your CommandCentre username is: ${username}`,
+          ).catch(() => {});
+        }
+        await writePublicAudit(req, {
+          entityType: 'auth_recovery',
+          entityId: email,
+          action: 'auth.username_recovery_sent',
+          details: null,
+        });
+      } else {
+        await writePublicAudit(req, {
+          entityType: 'auth_recovery',
+          entityId: email,
+          action: 'auth.username_recovery_noop',
+          details: JSON.stringify({ reason: 'email_not_found' }),
+        });
+      }
+
       return res.json({
         ok: true,
-        message: 'If an account exists for this email, username recovery details were generated.',
-        username: user?.username || user?.name || null,
+        message: 'If an account exists for this email, the username has been sent to it.',
       });
     },
   );
@@ -281,6 +328,14 @@ export default function authRouteFactory({
         });
       }
 
+      // Every failure below returns the exact same generic message — email
+      // not found, wrong code, and expired code must be indistinguishable
+      // to the caller, or this becomes an account-enumeration oracle (an
+      // attacker could tell which emails have accounts just from which
+      // error comes back). The audit log still records the real reason
+      // for operators, via the distinct `action` value.
+      const genericResetError = { error: 'Invalid or expired reset code' };
+
       const user = await userModel.findOne({ where: { email } });
       if (!user) {
         await writePublicAudit(req, {
@@ -289,7 +344,7 @@ export default function authRouteFactory({
           action: 'auth.reset_invalid_request',
           details: JSON.stringify({ reason: 'email_not_found' }),
         });
-        return res.status(400).json({ error: 'Invalid reset request' });
+        return res.status(400).json(genericResetError);
       }
 
       if (!user.resetPasswordCode || user.resetPasswordCode !== req.body.resetCode.trim()) {
@@ -299,7 +354,7 @@ export default function authRouteFactory({
           action: 'auth.reset_invalid_code',
           details: null,
         });
-        return res.status(400).json({ error: 'Invalid reset code' });
+        return res.status(400).json(genericResetError);
       }
 
       if (!user.resetPasswordCodeExpiresAt || new Date(user.resetPasswordCodeExpiresAt).getTime() < Date.now()) {
@@ -309,7 +364,7 @@ export default function authRouteFactory({
           action: 'auth.reset_code_expired',
           details: null,
         });
-        return res.status(400).json({ error: 'Reset code expired' });
+        return res.status(400).json(genericResetError);
       }
 
       await user.update({

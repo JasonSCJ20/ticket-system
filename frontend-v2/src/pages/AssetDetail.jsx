@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { Card, Badge } from '../components/ui.jsx';
+import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import {
   issueAgentKey,
   setEdgeCredential,
@@ -37,7 +38,7 @@ const inputStyle = {
 
 export default function AssetDetail({ asset, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState(null);
+  const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [issuedKey, setIssuedKey] = useState(null);
   const [edgeToken, setEdgeToken] = useState('');
   const [verifyState, setVerifyState] = useState(null); // 'pending' | 'verified' | 'timeout' | 'unsupported'
@@ -48,18 +49,16 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
 
   useEffect(() => () => clearInterval(pollRef.current), []);
 
-  const note = (tone, text) => setMessage({ tone, text });
-
   const handleIssueAgentKey = async () => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       const result = await issueAgentKey(asset.id);
       setIssuedKey(result.agentKey);
-      note('ok', result.warning);
+      notifySuccess(result.warning);
       onChanged();
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to issue an agent key.');
     } finally {
       setBusy(false);
     }
@@ -68,14 +67,14 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
   const handleSetEdgeCredential = async () => {
     if (!edgeToken.trim()) return;
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await setEdgeCredential(asset.id, edgeToken.trim());
       setEdgeToken('');
-      note('ok', 'Edge credential stored (encrypted). Asset is in shadow mode until verified.');
+      notifySuccess('Edge credential stored (encrypted). Asset is in shadow mode until verified.');
       onChanged();
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to store that edge credential.');
     } finally {
       setBusy(false);
     }
@@ -83,7 +82,7 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
 
   const handleVerify = async () => {
     setBusy(true);
-    setMessage(null);
+    clear();
     setVerifyState('pending');
     try {
       const { verificationId } = await startVerification(asset.id);
@@ -95,36 +94,46 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
           if (poll.status === 'verified') {
             clearInterval(pollRef.current);
             setVerifyState('verified');
-            note('ok', 'Canary verified — the agent confirmed it saw the probe. You can now promote to active mode.');
+            notifySuccess('Canary verified — the agent confirmed it saw the probe. You can now promote to active mode.');
             onChanged();
             setBusy(false);
           } else if (attempts >= 20) {
             clearInterval(pollRef.current);
             setVerifyState('timeout');
-            note('critical', 'Verification timed out — the agent never reported seeing the canary. Confirm the agent is running.');
+            notifyError(
+              { message: 'Verification timed out — the agent never reported seeing the canary. Confirm the agent is installed and running, then try again.' },
+            );
             setBusy(false);
           }
         } catch (err) {
           clearInterval(pollRef.current);
-          note('critical', err.message);
+          notifyError(err, 'Verification check failed.');
           setBusy(false);
         }
       }, 1500);
     } catch (err) {
-      note('critical', err.message);
+      if (err.status === 409) {
+        notifyError({ message: 'No agent heartbeat received yet — confirm the agent is installed and running before verifying.' });
+      } else {
+        notifyError(err, 'Failed to start verification.');
+      }
       setBusy(false);
     }
   };
 
   const handlePromote = async (mode) => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await setEnforcementMode(asset.id, mode);
-      note('ok', `Enforcement mode set to ${mode}.`);
+      notifySuccess(`Enforcement mode set to ${mode}.`);
       onChanged();
     } catch (err) {
-      note('critical', err.message);
+      if (err.status === 409 && mode === 'active') {
+        notifyError({ message: 'Cannot promote to active enforcement until verification succeeds — run the canary verification first.' });
+      } else {
+        notifyError(err, 'Failed to change enforcement mode.');
+      }
     } finally {
       setBusy(false);
     }
@@ -133,14 +142,14 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
   const handleQueueCommand = async () => {
     if (!cmdTarget.trim()) return;
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await queueAgentCommand(asset.id, cmdAction, cmdTarget.trim(), cmdReason.trim() || undefined);
-      note('ok', `Command queued — the agent will pick it up on its next poll.`);
+      notifySuccess('Command queued — the agent will pick it up on its next poll.');
       setCmdTarget('');
       setCmdReason('');
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to queue that command.');
     } finally {
       setBusy(false);
     }
@@ -155,20 +164,7 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
         </button>
       }
     >
-      {message && (
-        <div
-          style={{
-            marginBottom: 10,
-            padding: '8px 10px',
-            borderRadius: 8,
-            fontSize: 11.5,
-            background: message.tone === 'ok' ? 'var(--success-soft)' : 'var(--danger-soft)',
-            color: message.tone === 'ok' ? 'var(--success)' : 'var(--danger)',
-          }}
-        >
-          {message.text}
-        </div>
-      )}
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
       <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 10, wordBreak: 'break-all' }}>{asset.baseUrl}</div>
 

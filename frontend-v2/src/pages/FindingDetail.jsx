@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Card, Badge } from '../components/ui.jsx';
+import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
 import { fetchFindingBrief, confirmFinding, updateFindingStatus, createTicketFromFinding } from '../api/security.js';
 import { useApi } from '../hooks/useApi.js';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 
 const STATUSES = ['new', 'investigating', 'remediated', 'dismissed'];
 
@@ -21,20 +22,18 @@ function btnStyle(color, outline = false) {
 export default function FindingDetail({ finding, onClose, onChanged }) {
   const brief = useApi(() => fetchFindingBrief(finding.id), [finding.id]);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState(null);
+  const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [reason, setReason] = useState('');
-
-  const note = (tone, text) => setMessage({ tone, text });
 
   const handleConfirm = async () => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await confirmFinding(finding.id);
-      note('ok', 'Finding confirmed.');
+      notifySuccess('Finding confirmed.');
       onChanged();
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to confirm that finding.');
     } finally {
       setBusy(false);
     }
@@ -42,14 +41,14 @@ export default function FindingDetail({ finding, onClose, onChanged }) {
 
   const handleStatus = async (status) => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await updateFindingStatus(finding.id, status, reason.trim() || undefined);
-      note('ok', `Status set to ${status}.`);
+      notifySuccess(`Status set to ${status}.`);
       setReason('');
       onChanged();
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to update that finding\'s status.');
     } finally {
       setBusy(false);
     }
@@ -57,13 +56,13 @@ export default function FindingDetail({ finding, onClose, onChanged }) {
 
   const handleCreateTicket = async () => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       const result = await createTicketFromFinding(finding.id);
-      note('ok', `Ticket CC-${result.ticketId} created.`);
+      notifySuccess(`Ticket CC-${result.ticketId} created.`);
       onChanged();
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to create a ticket from that finding.');
     } finally {
       setBusy(false);
     }
@@ -80,20 +79,7 @@ export default function FindingDetail({ finding, onClose, onChanged }) {
         </button>
       }
     >
-      {message && (
-        <div
-          style={{
-            marginBottom: 10,
-            padding: '8px 10px',
-            borderRadius: 8,
-            fontSize: 11.5,
-            background: message.tone === 'ok' ? 'var(--success-soft)' : 'var(--danger-soft)',
-            color: message.tone === 'ok' ? 'var(--success)' : 'var(--danger)',
-          }}
-        >
-          {message.text}
-        </div>
-      )}
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
         <Badge tone={finding.severity}>{finding.severity}</Badge>

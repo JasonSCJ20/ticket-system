@@ -4,6 +4,8 @@ import { AuthProvider } from './auth/AuthContext.jsx';
 import ProtectedRoute from './auth/ProtectedRoute.jsx';
 import AppShell from './components/AppShell.jsx';
 import Login from './pages/Login.jsx';
+import ForgotUsername from './pages/ForgotUsername.jsx';
+import ForgotPassword from './pages/ForgotPassword.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Tickets from './pages/Tickets.jsx';
 import Findings from './pages/Findings.jsx';
@@ -23,6 +25,8 @@ export default function App() {
         <BrowserRouter>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/forgot-username" element={<ForgotUsername />} />
+            <Route path="/forgot-password" element={<ForgotPassword />} />
             <Route
               element={
                 <ProtectedRoute>

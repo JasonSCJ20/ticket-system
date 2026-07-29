@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { fetchUsers, createUser } from '../api/users.js';
-import { Card, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
 
 const DEPARTMENT_OPTIONS = ['Networks', 'Dev', 'Hardware'];
 const AUDIENCE_LABELS = { STAFF: 'Operational staff', TJN: 'CommandCentre manager', GJN: 'Operational manager', BJN: 'Executive', DGSN: 'Stakeholder' };
@@ -39,12 +40,12 @@ export default function Team() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', surname: '', department: 'Networks', jobTitle: '', telegramNumber: '', email: '', scjId: '', role: 'analyst' });
   const [busy, setBusy] = useState(false);
-  const [formError, setFormError] = useState(null);
+  const { feedback, notifyError, clear } = useActionFeedback();
 
   const handleCreate = async () => {
     if (!form.name.trim() || !form.surname.trim() || !form.email.trim() || !form.telegramNumber.trim() || !form.scjId.trim()) return;
     setBusy(true);
-    setFormError(null);
+    clear();
     try {
       await createUser({
         name: form.name.trim(),
@@ -60,7 +61,7 @@ export default function Team() {
       setShowForm(false);
       reload();
     } catch (err) {
-      setFormError(err.message);
+      notifyError(err, 'Failed to add that team member.');
     } finally {
       setBusy(false);
     }
@@ -80,9 +81,10 @@ export default function Team() {
         </button>
       }
     >
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
+
       {showForm && (
         <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-          {formError && <p style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 0 }}>{formError}</p>}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
             <input placeholder="First name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} />
             <input placeholder="Surname" value={form.surname} onChange={(e) => setForm({ ...form, surname: e.target.value })} style={inputStyle} />

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { fetchFortressPosture, runRecoveryDrill } from '../api/security.js';
 import { fetchKillSwitchStatus, revokeAllSessions, blockIp, unblockIp, setLockdown } from '../api/fortressKillSwitch.js';
-import { Card, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
 import Gauge from '../components/charts/Gauge.jsx';
 
 const CONTROL_LABELS = {
@@ -27,7 +28,7 @@ export default function Fortress() {
   const posture = useApi(fetchFortressPosture, []);
   const killSwitch = useApi(fetchKillSwitchStatus, []);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState(null);
+  const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [ipInput, setIpInput] = useState('');
   const [drillResult, setDrillResult] = useState(null);
 
@@ -39,14 +40,14 @@ export default function Fortress() {
   const withConfirm = async (label, warningText, action) => {
     if (!window.confirm(warningText)) return;
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       const reason = window.prompt(`Reason for ${label} (shown in the audit log):`, '') || '';
       const result = await action(reason);
-      setMessage({ tone: 'ok', text: result?.message || `${label} completed.` });
+      notifySuccess(result?.message || `${label} completed.`);
       reload();
     } catch (err) {
-      setMessage({ tone: 'critical', text: err.message });
+      notifyError(err, `Failed to complete ${label}.`);
     } finally {
       setBusy(false);
     }
@@ -55,14 +56,14 @@ export default function Fortress() {
   const handleBlockIp = async () => {
     if (!ipInput.trim()) return;
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await blockIp(ipInput.trim());
-      setMessage({ tone: 'ok', text: `Blocked ${ipInput.trim()}.` });
+      notifySuccess(`Blocked ${ipInput.trim()}.`);
       setIpInput('');
       reload();
     } catch (err) {
-      setMessage({ tone: 'critical', text: err.message });
+      notifyError(err, 'Failed to block that IP.');
     } finally {
       setBusy(false);
     }
@@ -70,9 +71,13 @@ export default function Fortress() {
 
   const handleUnblockIp = async (ip) => {
     setBusy(true);
+    clear();
     try {
       await unblockIp(ip);
+      notifySuccess(`Unblocked ${ip}.`);
       reload();
+    } catch (err) {
+      notifyError(err, 'Failed to unblock that IP.');
     } finally {
       setBusy(false);
     }
@@ -81,11 +86,12 @@ export default function Fortress() {
   const handleDrill = async () => {
     setBusy(true);
     setDrillResult(null);
+    clear();
     try {
       const result = await runRecoveryDrill();
       setDrillResult(result);
     } catch (err) {
-      setMessage({ tone: 'critical', text: err.message });
+      notifyError(err, 'Failed to run the recovery drill.');
     } finally {
       setBusy(false);
     }
@@ -103,20 +109,7 @@ export default function Fortress() {
 
   return (
     <div>
-      {message && (
-        <div
-          style={{
-            marginBottom: 12,
-            padding: '10px 12px',
-            borderRadius: 8,
-            fontSize: 12.5,
-            background: message.tone === 'ok' ? 'var(--success-soft)' : 'var(--danger-soft)',
-            color: message.tone === 'ok' ? 'var(--success)' : 'var(--danger)',
-          }}
-        >
-          {message.text}
-        </div>
-      )}
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
       {ks.lockdownActive && (
         <div style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 8, background: 'var(--danger-soft)', color: 'var(--danger)', fontSize: 13, fontWeight: 700 }}>

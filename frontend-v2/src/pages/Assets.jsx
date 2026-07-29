@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { fetchApplications, createApplication } from '../api/security.js';
-import { Card, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
 import AssetDetail from './AssetDetail.jsx';
 
 const HEALTH_TONE = { healthy: 'ok', degraded: 'high', critical: 'critical', unknown: 'low' };
@@ -21,14 +22,14 @@ export default function Assets() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ name: '', baseUrl: '', environment: 'production', ownerEmail: '' });
   const [busy, setBusy] = useState(false);
-  const [formError, setFormError] = useState(null);
+  const { feedback, notifyError, clear } = useActionFeedback();
 
   const selected = assets?.find((a) => a.id === selectedId) || null;
 
   const handleCreate = async () => {
     if (!form.name.trim() || !form.baseUrl.trim()) return;
     setBusy(true);
-    setFormError(null);
+    clear();
     try {
       const created = await createApplication({
         name: form.name.trim(),
@@ -41,7 +42,7 @@ export default function Assets() {
       reload();
       setSelectedId(created.id);
     } catch (err) {
-      setFormError(err.message);
+      notifyError(err, 'Failed to register that asset.');
     } finally {
       setBusy(false);
     }
@@ -51,7 +52,9 @@ export default function Assets() {
   if (loading) return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading assets…</p>;
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: selected ? '1.4fr 1fr' : '1fr', gap: 12 }}>
+    <div>
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
+      <div style={{ display: 'grid', gridTemplateColumns: selected ? '1.4fr 1fr' : '1fr', gap: 12 }}>
       <Card
         title={`Registered assets (${assets.length})`}
         right={
@@ -65,7 +68,6 @@ export default function Assets() {
       >
         {showForm && (
           <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-            {formError && <p style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 0 }}>{formError}</p>}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
               <input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} />
               <input placeholder="Base URL (https://...)" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} style={inputStyle} />
@@ -129,6 +131,7 @@ export default function Assets() {
           onChanged={reload}
         />
       )}
+      </div>
     </div>
   );
 }

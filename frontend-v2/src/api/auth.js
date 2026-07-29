@@ -7,9 +7,11 @@ export async function login(username, password, mfaCode = '') {
     skipAuthRedirect: true,
     body: { username: normalizedUsername, password, ...(mfaCode ? { mfaCode } : {}) },
   }).catch((err) => {
-    // Login 401s are expected (bad credentials / mfa required), not a session
-    // expiry — surface them as normal responses instead of throwing.
-    if (err.status === 401) return err.body || {};
+    // Only the "MFA code needed" 401 is a normal response to hand back to the
+    // form — any other 401 (bad credentials, disabled account) is a real
+    // error and must propagate so the caller shows it instead of silently
+    // treating a failed login as success.
+    if (err.status === 401 && err.body?.mfaRequired) return err.body;
     throw err;
   });
 
@@ -46,11 +48,11 @@ export function requestPasswordReset(email) {
   return request('/auth/forgot-password/request', { method: 'POST', skipAuthRedirect: true, body: { email } });
 }
 
-export function resetPassword(email, code, password) {
+export function resetPassword(email, resetCode, newPassword) {
   return request('/auth/forgot-password/reset', {
     method: 'POST',
     skipAuthRedirect: true,
-    body: { email, code, password },
+    body: { email, resetCode, newPassword },
   });
 }
 

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import * as ticketsApi from '../api/tickets.js';
-import { Card, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
 
 function slaLabel(slaDueAt, breachedSla) {
   if (!slaDueAt) return null;
@@ -16,7 +17,7 @@ export default function TicketDetail({ ticket, onClose, onChanged }) {
   const actionItems = useApi(() => ticketsApi.fetchActionItems(ticket.id), [ticket.id]);
   const [newComment, setNewComment] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
+  const { feedback, notifyError, clear } = useActionFeedback();
 
   const currentIndex = ticketsApi.LIFECYCLE_STAGES.indexOf(ticket.lifecycleStage || 'identified');
   const nextStage = ticketsApi.LIFECYCLE_STAGES[currentIndex + 1];
@@ -24,12 +25,12 @@ export default function TicketDetail({ ticket, onClose, onChanged }) {
   const handleAdvance = async () => {
     if (!nextStage) return;
     setBusy(true);
-    setError(null);
+    clear();
     try {
       await ticketsApi.transitionTicket(ticket.id, nextStage);
       onChanged();
     } catch (err) {
-      setError(err);
+      notifyError(err, `Failed to advance this ticket to ${nextStage}.`);
     } finally {
       setBusy(false);
     }
@@ -38,13 +39,13 @@ export default function TicketDetail({ ticket, onClose, onChanged }) {
   const handleAddComment = async () => {
     if (!newComment.trim()) return;
     setBusy(true);
-    setError(null);
+    clear();
     try {
       await ticketsApi.addComment(ticket.id, { message: newComment.trim() });
       setNewComment('');
       comments.reload();
     } catch (err) {
-      setError(err);
+      notifyError(err, 'Failed to add that comment.');
     } finally {
       setBusy(false);
     }
@@ -92,7 +93,7 @@ export default function TicketDetail({ ticket, onClose, onChanged }) {
         </tbody>
       </table>
 
-      {error && <ErrorState error={error} />}
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
       <div style={{ display: 'flex', gap: 6, marginBottom: 16 }}>
         {nextStage && (

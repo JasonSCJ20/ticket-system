@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext.jsx';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { updateProfile, fetchMfaSetup, enableMfa, disableMfa } from '../api/auth.js';
 import { setToken } from '../api/client.js';
-import { Card, Badge } from '../components/ui.jsx';
+import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
 
 const AUDIENCE_OPTIONS = [
   { value: 'STAFF', label: 'Operational staff' },
@@ -46,12 +47,11 @@ export default function Settings() {
     operationalTeams: profile?.operationalTeams || [],
   });
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState(null);
+  const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [mfaSetup, setMfaSetup] = useState(null);
   const [mfaCode, setMfaCode] = useState('');
 
   const isStaff = form.audienceCode === 'STAFF';
-  const note = (tone, text) => setMessage({ tone, text });
 
   const toggleTeam = (team) => {
     setForm((f) => {
@@ -63,7 +63,7 @@ export default function Settings() {
 
   const handleSaveProfile = async () => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       const result = await updateProfile({
         audienceCode: form.audienceCode,
@@ -73,9 +73,9 @@ export default function Settings() {
       });
       if (result.access_token) setToken(result.access_token);
       setProfile((p) => ({ ...p, ...result }));
-      note('ok', 'Profile updated.');
+      notifySuccess('Profile updated.');
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to update your profile.');
     } finally {
       setBusy(false);
     }
@@ -83,12 +83,12 @@ export default function Settings() {
 
   const handleStartMfaSetup = async () => {
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       const result = await fetchMfaSetup();
       setMfaSetup(result);
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to start MFA setup.');
     } finally {
       setBusy(false);
     }
@@ -97,15 +97,15 @@ export default function Settings() {
   const handleEnableMfa = async () => {
     if (!mfaCode.trim()) return;
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await enableMfa(mfaCode.trim());
-      note('ok', 'MFA enabled.');
+      notifySuccess('MFA enabled.');
       setMfaSetup(null);
       setMfaCode('');
       setProfile((p) => ({ ...p, mfaEnabled: true }));
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'That code was not accepted. Check your authenticator app and try again.');
     } finally {
       setBusy(false);
     }
@@ -115,13 +115,13 @@ export default function Settings() {
     const code = window.prompt('Enter your current MFA code to disable it:');
     if (!code) return;
     setBusy(true);
-    setMessage(null);
+    clear();
     try {
       await disableMfa(code.trim());
-      note('ok', 'MFA disabled.');
+      notifySuccess('MFA disabled.');
       setProfile((p) => ({ ...p, mfaEnabled: false }));
     } catch (err) {
-      note('critical', err.message);
+      notifyError(err, 'Failed to disable MFA.');
     } finally {
       setBusy(false);
     }
@@ -129,20 +129,7 @@ export default function Settings() {
 
   return (
     <div>
-      {message && (
-        <div
-          style={{
-            marginBottom: 12,
-            padding: '8px 10px',
-            borderRadius: 8,
-            fontSize: 11.5,
-            background: message.tone === 'ok' ? 'var(--success-soft)' : 'var(--danger-soft)',
-            color: message.tone === 'ok' ? 'var(--success)' : 'var(--danger)',
-          }}
-        >
-          {message.text}
-        </div>
-      )}
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
       <Card title="Profile">
         <p style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 0 }}>

@@ -50,14 +50,68 @@ export function EmptyState({ children }) {
   return <p style={{ fontSize: 12.5, color: 'var(--text-muted)' }}>{children}</p>;
 }
 
+// Consistent success/error banner for pages that perform actions — pairs
+// with the useActionFeedback hook. Shows every validation-error line when
+// there's more than one, instead of only the first.
+export function FeedbackBanner({ feedback, onDismiss }) {
+  if (!feedback) return null;
+  const isOk = feedback.tone === 'ok';
+  return (
+    <div
+      style={{
+        marginBottom: 12,
+        padding: '10px 12px',
+        borderRadius: 8,
+        fontSize: 12.5,
+        background: isOk ? 'var(--success-soft)' : 'var(--danger-soft)',
+        color: isOk ? 'var(--success)' : 'var(--danger)',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'flex-start',
+        gap: 10,
+      }}
+    >
+      <div>
+        <div>{feedback.text}</div>
+        {feedback.details && (
+          <ul style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+            {feedback.details.map((line, i) => (
+              <li key={i}>{line}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {onDismiss && (
+        <button
+          onClick={onDismiss}
+          style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 14, lineHeight: 1, opacity: 0.7 }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function ErrorState({ error, onRetry }) {
+  // A 428 here always means the signed-in account hasn't completed its
+  // profile yet — retrying the same request will just 428 again, so point
+  // the user at Settings (the one place that fixes it) instead of a
+  // dead-end "Retry" button.
+  const needsProfile = error?.status === 428 || error?.body?.profileCompletionRequired;
   return (
     <div style={{ fontSize: 12.5, color: 'var(--danger)', background: 'var(--danger-soft)', padding: '10px 12px', borderRadius: 8 }}>
-      {error?.message || 'Something went wrong.'}
-      {onRetry && (
-        <button onClick={onRetry} style={{ marginLeft: 10, background: 'none', border: 'none', color: 'var(--danger)', textDecoration: 'underline', cursor: 'pointer', fontSize: 12 }}>
-          Retry
-        </button>
+      {needsProfile ? 'Your profile needs to be completed before this page can load.' : error?.message || 'Something went wrong.'}
+      {needsProfile ? (
+        <a href="/settings" style={{ marginLeft: 10, color: 'var(--danger)', textDecoration: 'underline', fontSize: 12 }}>
+          Go to Settings
+        </a>
+      ) : (
+        onRetry && (
+          <button onClick={onRetry} style={{ marginLeft: 10, background: 'none', border: 'none', color: 'var(--danger)', textDecoration: 'underline', cursor: 'pointer', fontSize: 12 }}>
+            Retry
+          </button>
+        )
       )}
     </div>
   );

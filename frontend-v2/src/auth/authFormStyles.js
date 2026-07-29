@@ -1,0 +1,60 @@
+// Shared look for the unauthenticated auth-flow pages (Login, forgot
+// username/password) so they all read as one consistent card, not three
+// slightly different ones.
+export const authStyles = {
+  wrap: {
+    minHeight: '100vh',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: 'var(--bg)',
+  },
+  card: {
+    width: 340,
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+    padding: '32px 28px',
+  },
+  brandRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 22 },
+  brandName: { fontWeight: 600, fontSize: 16 },
+  subtitle: { fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 20px' },
+  error: {
+    background: 'var(--danger-soft)',
+    color: 'var(--danger)',
+    fontSize: 12.5,
+    padding: '8px 10px',
+    borderRadius: 8,
+    marginBottom: 14,
+  },
+  success: {
+    background: 'var(--success-soft)',
+    color: 'var(--success)',
+    fontSize: 12.5,
+    padding: '8px 10px',
+    borderRadius: 8,
+    marginBottom: 14,
+  },
+  label: { fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 },
+  input: {
+    width: '100%',
+    padding: '9px 11px',
+    borderRadius: 8,
+    border: '1px solid var(--border)',
+    background: 'var(--surface-2)',
+    color: 'var(--text)',
+    marginBottom: 14,
+  },
+  submitBtn: {
+    width: '100%',
+    padding: '10px',
+    borderRadius: 8,
+    border: '1px solid var(--accent)',
+    background: 'var(--accent)',
+    color: 'var(--bg)',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  linksRow: { display: 'flex', justifyContent: 'space-between', marginTop: 16, fontSize: 11.5 },
+  link: { color: 'var(--accent)', textDecoration: 'none' },
+};

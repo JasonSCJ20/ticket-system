@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext.jsx';
 import Logo from '../components/Logo.jsx';
+import { authStyles as styles } from '../auth/authFormStyles.js';
 
 export default function Login() {
   const { login } = useAuth();
@@ -25,7 +26,15 @@ export default function Login() {
         navigate('/', { replace: true });
       }
     } catch (err) {
-      setError(err.message || 'Sign in failed.');
+      if (err.status === 429) {
+        setError('Too many sign-in attempts. Please wait a few minutes and try again.');
+      } else if (err.status === 401) {
+        setError(needsMfa ? 'That authenticator code is not correct or has expired.' : 'That username or password is not correct.');
+      } else if (!err.status) {
+        setError(`Unable to reach CommandCentre. ${err.message || 'Check your connection and try again.'}`);
+      } else {
+        setError(err.message || 'Sign in failed. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -94,65 +103,15 @@ export default function Login() {
 
         {!needsMfa && (
           <div style={styles.linksRow}>
-            <a href="/forgot-username" style={styles.link}>
+            <Link to="/forgot-username" style={styles.link}>
               Forgot username
-            </a>
-            <a href="/forgot-password" style={styles.link}>
+            </Link>
+            <Link to="/forgot-password" style={styles.link}>
               Forgot password
-            </a>
+            </Link>
           </div>
         )}
       </form>
     </div>
   );
 }
-
-const styles = {
-  wrap: {
-    minHeight: '100vh',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: 'var(--bg)',
-  },
-  card: {
-    width: 340,
-    background: 'var(--surface)',
-    border: '1px solid var(--border)',
-    borderRadius: 'var(--radius)',
-    padding: '32px 28px',
-  },
-  brandRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 22 },
-  brandName: { fontWeight: 600, fontSize: 16 },
-  subtitle: { fontSize: 12.5, color: 'var(--text-muted)', margin: '0 0 20px' },
-  error: {
-    background: 'var(--danger-soft)',
-    color: 'var(--danger)',
-    fontSize: 12.5,
-    padding: '8px 10px',
-    borderRadius: 8,
-    marginBottom: 14,
-  },
-  label: { fontSize: 11, color: 'var(--text-muted)', display: 'block', marginBottom: 4 },
-  input: {
-    width: '100%',
-    padding: '9px 11px',
-    borderRadius: 8,
-    border: '1px solid var(--border)',
-    background: 'var(--surface-2)',
-    color: 'var(--text)',
-    marginBottom: 14,
-  },
-  submitBtn: {
-    width: '100%',
-    padding: '10px',
-    borderRadius: 8,
-    border: '1px solid var(--accent)',
-    background: 'var(--accent)',
-    color: 'var(--bg)',
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  linksRow: { display: 'flex', justifyContent: 'space-between', marginTop: 16, fontSize: 11.5 },
-  link: { color: 'var(--accent)', textDecoration: 'none' },
-};

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
+import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { fetchPatches, createPatch, updatePatchStatus } from '../api/security.js';
-import { Card, KpiRow, Kpi, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, KpiRow, Kpi, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
 
 const STATUS_OPTIONS = ['todo', 'in_progress', 'completed'];
 const SEVERITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
@@ -21,12 +22,12 @@ export default function Patches() {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ assetType: 'application', assetId: '', title: '', severity: 'medium', ownerEmail: '', dueDate: '' });
   const [busy, setBusy] = useState(false);
-  const [formError, setFormError] = useState(null);
+  const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
 
   const handleCreate = async () => {
     if (!form.title.trim() || !form.assetId) return;
     setBusy(true);
-    setFormError(null);
+    clear();
     try {
       await createPatch({
         assetType: form.assetType,
@@ -40,7 +41,7 @@ export default function Patches() {
       setShowForm(false);
       reload();
     } catch (err) {
-      setFormError(err.message);
+      notifyError(err, 'Failed to create that patch task.');
     } finally {
       setBusy(false);
     }
@@ -49,9 +50,13 @@ export default function Patches() {
   const handleStatusChange = async (id, status) => {
     const notes = status === 'completed' ? window.prompt('Completion notes (optional):', '') : null;
     setBusy(true);
+    clear();
     try {
       await updatePatchStatus(id, status, notes || undefined);
+      notifySuccess(`Status set to ${status}.`);
       reload();
+    } catch (err) {
+      notifyError(err, 'Failed to update that task\'s status.');
     } finally {
       setBusy(false);
     }
@@ -64,6 +69,8 @@ export default function Patches() {
 
   return (
     <div>
+      <FeedbackBanner feedback={feedback} onDismiss={clear} />
+
       <KpiRow>
         <Kpi label="Total tasks" value={summary.total} />
         <Kpi label="Overdue" value={summary.overdue} deltaColor={summary.overdue > 0 ? 'var(--danger)' : undefined} />
@@ -81,7 +88,6 @@ export default function Patches() {
       >
         {showForm && (
           <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
-            {formError && <p style={{ fontSize: 11.5, color: 'var(--danger)', marginTop: 0 }}>{formError}</p>}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
               <select value={form.assetType} onChange={(e) => setForm({ ...form, assetType: e.target.value })} style={inputStyle}>
                 {ASSET_TYPE_OPTIONS.map((t) => <option key={t} value={t}>{t}</option>)}

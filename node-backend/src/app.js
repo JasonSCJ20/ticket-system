@@ -448,6 +448,11 @@ async function setup() {
       name: configuredAdminName,
       surname: null,
       role: 'admin',
+      // Only set on first creation (never in the unconditional .update()
+      // below) so a fresh admin account isn't immediately stuck behind the
+      // requireCompletedProfile gate, while an admin who later picks their
+      // own audienceCode via Settings keeps it across restarts.
+      audienceCode: 'TJN',
       password_hash: passwordHash,
     },
   });
@@ -1146,6 +1151,7 @@ async function setup() {
   // operator-facing routes only.
   app.use(
     '/api/security/applications',
+    protectedApiLimiter,
     assetEnforcementRouteFactory({
       models: {
         ApplicationAsset: applicationAssetModel,
@@ -1160,6 +1166,7 @@ async function setup() {
 
   app.use(
     '/api/security/fortress/kill-switch',
+    protectedApiLimiter,
     fortressKillSwitchRouteFactory({
       models: { SecurityState: securityStateModel, AuditLog: auditLogModel },
       authMiddleware,

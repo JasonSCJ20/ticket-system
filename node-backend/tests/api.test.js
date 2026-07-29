@@ -53,14 +53,14 @@ describe('Auth', () => {
 });
 
 describe('Registration Policy', () => {
-  it('creates an account only when required identity fields and NHNE email are provided', async () => {
+  it('creates an account only when required identity fields and scratchsolidsolutions.org email are provided', async () => {
     const res = await request(app)
       .post('/api/auth/register')
       .send({
         name: 'Jane',
         surname: 'Doe',
         scjId: '00361031-00803',
-        email: 'jane.doe@nhne.org.za',
+        email: 'jane.doe@scratchsolidsolutions.org',
         telegramNumber: '+27110000001',
         telegramChatId: '100001001',
         audienceCode: 'TJN',
@@ -89,7 +89,7 @@ describe('Registration Policy', () => {
     expect(normalizedLoginRes.body).toHaveProperty('access_token');
   });
 
-  it('rejects account creation for non-nhne email domains', async () => {
+  it('rejects account creation for non-scratchsolidsolutions.org email domains', async () => {
     const res = await request(app)
       .post('/api/auth/register')
       .send({
@@ -105,7 +105,7 @@ describe('Registration Policy', () => {
       });
 
     expect(res.status).toBe(422);
-    expect(res.body.error).toBe('Email address must use the @nhne.org.za domain');
+    expect(res.body.error).toBe('Email address must use the @scratchsolidsolutions.org domain');
   });
 
   it('rejects weak passwords during account creation', async () => {
@@ -115,7 +115,7 @@ describe('Registration Policy', () => {
         name: 'Jill',
         surname: 'Taylor',
         scjId: '00361031-00805',
-        email: 'jill.taylor@nhne.org.za',
+        email: 'jill.taylor@scratchsolidsolutions.org',
         telegramNumber: '+27110000003',
         telegramChatId: '100001003',
         audienceCode: 'BJN',
@@ -405,7 +405,7 @@ describe('Reports, Governance, and Assistant', () => {
         name: 'Staff',
         surname: `Limited${Date.now()}`,
         scjId: '00361031-00806',
-        email: `staff.limited.${Date.now()}@nhne.org.za`,
+        email: `staff.limited.${Date.now()}@scratchsolidsolutions.org`,
         telegramNumber: '+27110000006',
         telegramChatId: '100001006',
         audienceCode: 'STAFF',
