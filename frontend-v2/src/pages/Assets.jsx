@@ -6,6 +6,14 @@ import { Card, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
 import AssetDetail from './AssetDetail.jsx';
 
 const HEALTH_TONE = { healthy: 'ok', degraded: 'high', critical: 'critical', unknown: 'low' };
+const ASSET_TYPE_OPTIONS = [
+  { value: 'application', label: 'Application' },
+  { value: 'server', label: 'Server' },
+  { value: 'computer', label: 'Computer' },
+  { value: 'router', label: 'Router' },
+  { value: 'other', label: 'Other' },
+];
+const ASSET_TYPE_LABELS = Object.fromEntries(ASSET_TYPE_OPTIONS.map((o) => [o.value, o.label]));
 
 const inputStyle = {
   padding: '6px 8px',
@@ -20,24 +28,26 @@ export default function Assets() {
   const { data: assets, loading, error, reload } = useApi(fetchApplications, []);
   const [selectedId, setSelectedId] = useState(null);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', baseUrl: '', environment: 'production', ownerEmail: '' });
+  const [form, setForm] = useState({ name: '', assetType: 'application', baseUrl: '', ipAddress: '', environment: 'production', ownerEmail: '' });
   const [busy, setBusy] = useState(false);
   const { feedback, notifyError, clear } = useActionFeedback();
 
   const selected = assets?.find((a) => a.id === selectedId) || null;
 
   const handleCreate = async () => {
-    if (!form.name.trim() || !form.baseUrl.trim()) return;
+    if (!form.name.trim() || (!form.baseUrl.trim() && !form.ipAddress.trim())) return;
     setBusy(true);
     clear();
     try {
       const created = await createApplication({
         name: form.name.trim(),
-        baseUrl: form.baseUrl.trim(),
+        assetType: form.assetType,
+        baseUrl: form.baseUrl.trim() || undefined,
+        ipAddress: form.ipAddress.trim() || undefined,
         environment: form.environment,
         ownerEmail: form.ownerEmail.trim() || undefined,
       });
-      setForm({ name: '', baseUrl: '', environment: 'production', ownerEmail: '' });
+      setForm({ name: '', assetType: 'application', baseUrl: '', ipAddress: '', environment: 'production', ownerEmail: '' });
       setShowForm(false);
       reload();
       setSelectedId(created.id);
@@ -70,7 +80,11 @@ export default function Assets() {
           <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
               <input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} />
-              <input placeholder="Base URL (https://...)" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} style={inputStyle} />
+              <select value={form.assetType} onChange={(e) => setForm({ ...form, assetType: e.target.value })} style={inputStyle}>
+                {ASSET_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+              <input placeholder="Base URL (https://...) — for applications" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} style={inputStyle} />
+              <input placeholder="IP address — for servers/computers/routers" value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} style={inputStyle} />
               <select value={form.environment} onChange={(e) => setForm({ ...form, environment: e.target.value })} style={inputStyle}>
                 <option value="production">production</option>
                 <option value="staging">staging</option>
@@ -78,6 +92,7 @@ export default function Assets() {
               </select>
               <input placeholder="Owner email (optional)" value={form.ownerEmail} onChange={(e) => setForm({ ...form, ownerEmail: e.target.value })} style={inputStyle} />
             </div>
+            <p style={{ fontSize: 10.5, color: 'var(--text-muted)', margin: '0 0 8px' }}>Provide at least a base URL or an IP address.</p>
             <button
               disabled={busy}
               onClick={handleCreate}
@@ -95,10 +110,11 @@ export default function Assets() {
             <thead>
               <tr>
                 <th style={thStyle}>Name</th>
+                <th style={thStyle}>Type</th>
                 <th style={thStyle}>Environment</th>
                 <th style={thStyle}>Health</th>
                 <th style={thStyle}>Enforcement</th>
-                <th style={thStyle}>Mode</th>
+                <th style={thStyle}>Sentinel</th>
                 <th style={thStyle}>Verification</th>
               </tr>
             </thead>
@@ -110,12 +126,17 @@ export default function Assets() {
                   style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer', background: selectedId === a.id ? 'var(--accent-soft)' : 'transparent' }}
                 >
                   <td style={tdStyle}>{a.name}</td>
+                  <td style={tdStyle}>{ASSET_TYPE_LABELS[a.assetType] || a.assetType}</td>
                   <td style={tdStyle}>{a.environment}</td>
                   <td style={tdStyle}>
                     <Badge tone={HEALTH_TONE[a.healthStatus] || 'low'}>{a.healthStatus}</Badge>
                   </td>
-                  <td style={tdStyle}>{a.enforcementModel}</td>
-                  <td style={tdStyle}>{a.enforcementMode}</td>
+                  <td style={tdStyle}>{a.enforcementModel === 'none' ? '—' : `${a.enforcementModel} (${a.enforcementMode})`}</td>
+                  <td style={tdStyle}>
+                    <Badge tone={a.hasSentinelKey ? (a.sentinelMode === 'active' ? 'ok' : 'high') : 'low'}>
+                      {a.hasSentinelKey ? a.sentinelMode : 'not installed'}
+                    </Badge>
+                  </td>
                   <td style={tdStyle}>{a.verificationStatus}</td>
                 </tr>
               ))}

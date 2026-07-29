@@ -4,7 +4,12 @@ export default (sequelize) => {
   return sequelize.define('ApplicationAsset', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
     name: { type: DataTypes.STRING(128), allowNull: false, unique: true },
-    baseUrl: { type: DataTypes.STRING(512), allowNull: false },
+    // Not every asset has a web endpoint — a router or bare server has an IP
+    // but no baseUrl, so this can no longer be required. At least one of
+    // baseUrl/ipAddress is enforced at the route-validation layer instead.
+    baseUrl: { type: DataTypes.STRING(512), allowNull: true },
+    assetType: { type: DataTypes.ENUM('application', 'server', 'computer', 'router', 'other'), allowNull: false, defaultValue: 'application' },
+    ipAddress: { type: DataTypes.STRING(64), allowNull: true },
     environment: { type: DataTypes.ENUM('production', 'staging', 'development'), allowNull: false, defaultValue: 'production' },
     ownerEmail: { type: DataTypes.STRING(255), allowNull: true },
     enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
@@ -38,5 +43,16 @@ export default (sequelize) => {
     // Non-secret routing metadata needed to use the credential (which
     // account/zone it applies to) — safe to store unencrypted.
     edgeCredentialMeta: { type: DataTypes.JSON, allowNull: true },
+    // Host-level sentinel (@commandcentre/sentinel) — independent of
+    // enforcementModel above, since a sentinel can run alongside an embedded
+    // agent (defense in depth on one application asset) or completely alone
+    // (a router/server has no app to embed an agent into, only a host to run
+    // a sentinel on). Same one-way-hash pattern as agentKeyHash.
+    sentinelKeyHash: { type: DataTypes.STRING(128), allowNull: true },
+    // Same shadow-first philosophy as enforcementMode: a new sentinel only
+    // observes and reports until manually promoted to actually rewriting
+    // firewall rules.
+    sentinelMode: { type: DataTypes.ENUM('shadow', 'active'), allowNull: false, defaultValue: 'shadow' },
+    lastSentinelHeartbeatAt: { type: DataTypes.DATE, allowNull: true },
   });
 };

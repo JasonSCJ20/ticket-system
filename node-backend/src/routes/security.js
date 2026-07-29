@@ -1533,8 +1533,18 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     const applications = await ApplicationAsset.findAll({ order: [['name', 'ASC']] });
     const withRuntime = await Promise.all(applications.map(async (app) => {
       const runtime = await probeApplicationRuntime(app.baseUrl);
+      // Never spread the raw model — edgeCredentialSecret is a real,
+      // reversible ciphertext blob, and agentKeyHash/sentinelKeyHash have no
+      // reason to leave the server even as one-way hashes. Callers only need
+      // to know *whether* a credential/key exists, not its value.
+      const {
+        edgeCredentialSecret, agentKeyHash, sentinelKeyHash, ...safe
+      } = app.toJSON();
       return {
-        ...app.toJSON(),
+        ...safe,
+        hasAgentKey: Boolean(agentKeyHash),
+        hasEdgeCredential: Boolean(edgeCredentialSecret),
+        hasSentinelKey: Boolean(sentinelKeyHash),
         runtime,
       };
     }));
@@ -1545,9 +1555,21 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     '/applications',
     adminOnly,
     body('name').isString().trim().isLength({ min: 2, max: 128 }),
-    body('baseUrl').isURL({ require_tld: false }),
+    body('assetType').optional().isIn(['application', 'server', 'computer', 'router', 'other']),
+    body('baseUrl').optional({ checkFalsy: true }).isURL({ require_tld: false }),
+    body('ipAddress').optional({ checkFalsy: true }).isIP(),
     body('environment').isIn(['production', 'staging', 'development']),
     body('ownerEmail').optional().isEmail().normalizeEmail(),
+    // A router/server has an IP but no web endpoint; an application usually
+    // has a baseUrl but not necessarily a fixed IP CommandCentre would know.
+    // Either identifies the asset — an asset with neither is unreachable and
+    // uninspectable, so refuse it rather than silently create a dead entry.
+    body().custom((value) => {
+      if (!value.baseUrl && !value.ipAddress) {
+        throw new Error('Provide at least a base URL or an IP address for this asset');
+      }
+      return true;
+    }),
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
@@ -1555,7 +1577,9 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       try {
         const app = await ApplicationAsset.create({
           name: req.body.name.trim(),
-          baseUrl: req.body.baseUrl.trim(),
+          assetType: req.body.assetType || 'application',
+          baseUrl: req.body.baseUrl ? req.body.baseUrl.trim() : null,
+          ipAddress: req.body.ipAddress ? req.body.ipAddress.trim() : null,
           environment: req.body.environment,
           ownerEmail: req.body.ownerEmail || null,
         });

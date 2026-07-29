@@ -162,6 +162,9 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     if (asset.enforcementModel !== 'agent') {
       return res.status(400).json({ error: 'Asset has no enforcement model configured yet — issue an agent key or set an edge credential first.' });
     }
+    if (!asset.baseUrl) {
+      return res.status(409).json({ error: 'This asset has no base URL — the embedded-agent canary probe needs a real HTTP endpoint to reach. Assets without one (routers, bare servers) should use the sentinel model instead.' });
+    }
     if (!asset.lastHeartbeatAt) {
       return res.status(409).json({ error: 'No agent heartbeat received yet. Confirm the agent is installed and running before verifying.' });
     }

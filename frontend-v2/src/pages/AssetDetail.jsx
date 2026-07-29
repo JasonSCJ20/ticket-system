@@ -200,12 +200,18 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
     >
       <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
-      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 10, wordBreak: 'break-all' }}>{asset.baseUrl}</div>
+      <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginBottom: 10, wordBreak: 'break-all' }}>
+        {[asset.baseUrl, asset.ipAddress].filter(Boolean).join(' · ') || 'No endpoint configured'}
+      </div>
 
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 14 }}>
+        <Badge tone="low">{asset.assetType}</Badge>
         <Badge tone={asset.enforcementModel === 'none' ? 'low' : 'medium'}>{asset.enforcementModel}</Badge>
         <Badge tone={asset.enforcementMode === 'active' ? 'ok' : 'high'}>{asset.enforcementMode}</Badge>
         <Badge tone={VERIFICATION_TONE[asset.verificationStatus] || 'low'}>{asset.verificationStatus}</Badge>
+        <Badge tone={asset.hasSentinelKey ? (asset.sentinelMode === 'active' ? 'ok' : 'high') : 'low'}>
+          sentinel: {asset.hasSentinelKey ? asset.sentinelMode : 'not installed'}
+        </Badge>
       </div>
 
       {asset.enforcementModel === 'none' && (

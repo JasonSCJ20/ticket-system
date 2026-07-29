@@ -685,6 +685,47 @@ describe('Scan Queue Throughput', () => {
   });
 });
 
+describe('Asset Types (non-application assets)', () => {
+  it('registers a router by IP address alone, with no base URL', async () => {
+    const res = await request(app)
+      .post('/api/security/applications')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        name: `office-router-${Date.now()}`,
+        assetType: 'router',
+        ipAddress: '192.168.1.1',
+        environment: 'production',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.assetType).toBe('router');
+    expect(res.body.ipAddress).toBe('192.168.1.1');
+    expect(res.body.baseUrl).toBeNull();
+  });
+
+  it('rejects an asset with neither a base URL nor an IP address', async () => {
+    const res = await request(app)
+      .post('/api/security/applications')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: `unreachable-asset-${Date.now()}`, environment: 'production' });
+    expect(res.status).toBe(422);
+  });
+
+  it('never exposes raw key hashes or the edge credential ciphertext in the asset list', async () => {
+    const res = await request(app)
+      .get('/api/security/applications')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    for (const asset of res.body) {
+      expect(asset).not.toHaveProperty('agentKeyHash');
+      expect(asset).not.toHaveProperty('sentinelKeyHash');
+      expect(asset).not.toHaveProperty('edgeCredentialSecret');
+      expect(asset).toHaveProperty('hasAgentKey');
+      expect(asset).toHaveProperty('hasSentinelKey');
+      expect(asset).toHaveProperty('hasEdgeCredential');
+    }
+  });
+});
+
 describe('Asset Enforcement Onboarding', () => {
   let testServer;
   let testServerUrl;

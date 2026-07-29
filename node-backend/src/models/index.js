@@ -106,6 +106,16 @@ export const initModels = async () => {
       await sequelize.query(`ALTER TYPE "${enumTypeName}" ADD VALUE IF NOT EXISTS '${value}'`);
     };
 
+    // Loosening a NOT NULL constraint is always safe/additive (no existing
+    // row can violate a constraint that no longer exists) — unlike tightening
+    // one, which would need a data backfill first.
+    const ensureNullable = async (tableName, columnName) => {
+      const schema = await queryInterface.describeTable(tableName);
+      if (schema[columnName] && !schema[columnName].allowNull) {
+        await sequelize.query(`ALTER TABLE "${tableName}" ALTER COLUMN "${columnName}" DROP NOT NULL`);
+      }
+    };
+
     await ensureColumn('Users', 'username', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'surname', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'department', { type: DataTypes.STRING, allowNull: true });
@@ -172,6 +182,12 @@ export const initModels = async () => {
     await ensureColumn('ApplicationAssets', 'agentKeyHash', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('ApplicationAssets', 'edgeCredentialSecret', { type: DataTypes.TEXT, allowNull: true });
     await ensureColumn('ApplicationAssets', 'edgeCredentialMeta', { type: DataTypes.JSON, allowNull: true });
+    await ensureColumn('ApplicationAssets', 'assetType', { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'application' });
+    await ensureColumn('ApplicationAssets', 'ipAddress', { type: DataTypes.STRING(64), allowNull: true });
+    await ensureColumn('ApplicationAssets', 'sentinelKeyHash', { type: DataTypes.STRING(128), allowNull: true });
+    await ensureColumn('ApplicationAssets', 'sentinelMode', { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'shadow' });
+    await ensureColumn('ApplicationAssets', 'lastSentinelHeartbeatAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureNullable('ApplicationAssets', 'baseUrl');
     await ensureColumn('AgentCommands', 'externalRef', { type: DataTypes.STRING(255), allowNull: true });
     await ensureColumn('AgentCommands', 'failureReason', { type: DataTypes.STRING(500), allowNull: true });
     await ensureEnumValue('enum_AgentCommands_status', 'failed');
