@@ -1,0 +1,22 @@
+[Unit]
+Description=CommandCentre Sentinel (host-level IDS/IPS)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/commandcentre-sentinel/bin/sentinel.js
+Restart=always
+RestartSec=5
+Environment=COMMANDCENTRE_ASSET_ID=REPLACE_ME
+Environment=COMMANDCENTRE_SENTINEL_KEY=REPLACE_ME
+Environment=COMMANDCENTRE_URL=https://soc-api.scratchsolidsolutions.org/api
+
+# Runs as an unprivileged user with only the two capabilities it actually
+# needs — not root. AmbientCapabilities grants them to the process without
+# needing a setuid binary or full superuser rights.
+User=commandcentre-sentinel
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

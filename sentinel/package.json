@@ -1,0 +1,17 @@
+{
+  "name": "@commandcentre/sentinel",
+  "version": "1.0.0",
+  "description": "Host-level IDS/IPS daemon for CommandCentre — real port/connection visibility and firewall-level threat isolation, run as its own privileged service alongside (not inside) the protected asset's own application process.",
+  "type": "module",
+  "bin": {
+    "commandcentre-sentinel": "./bin/sentinel.js"
+  },
+  "scripts": {
+    "start": "node bin/sentinel.js",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}

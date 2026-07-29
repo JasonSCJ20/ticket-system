@@ -22,7 +22,7 @@ function pruneCanaries() {
 }
 
 export default ({ models, authMiddleware, notifyTicket }) => {
-  const { ApplicationAsset, AuditLog, AgentCommand, SecurityFinding } = models;
+  const { ApplicationAsset, AuditLog, AgentCommand, SecurityFinding, Ticket, TicketHistory } = models;
 
   const adminOnly = (req, res, next) => {
     if (req.user?.role === 'admin') return next();
@@ -40,6 +40,45 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     const asset = await ApplicationAsset.findByPk(assetId);
     if (!asset || !asset.agentKeyHash || !verifyAgentKey(presentedKey, asset.agentKeyHash)) {
       return res.status(401).json({ error: 'Invalid agent key' });
+    }
+    req.asset = asset;
+    next();
+  }
+
+  // Same shape as agentAuth, but for the host-level sentinel's own key —
+  // a separate credential from the app-layer agent's, since a sentinel can
+  // run on an asset that has no embedded agent at all (a router, a bare
+  // server) and the two are issued/rotated independently.
+  async function sentinelAuth(req, res, next) {
+    const assetId = Number(req.params.id);
+    const presentedKey = req.headers['x-agent-key'];
+    if (!Number.isInteger(assetId) || !presentedKey) {
+      return res.status(401).json({ error: 'Missing sentinel credentials' });
+    }
+    const asset = await ApplicationAsset.findByPk(assetId);
+    if (!asset || !asset.sentinelKeyHash || !verifyAgentKey(presentedKey, asset.sentinelKeyHash)) {
+      return res.status(401).json({ error: 'Invalid sentinel key' });
+    }
+    req.asset = asset;
+    next();
+  }
+
+  // The command queue (poll/ack) is shared: either the app-layer agent or the
+  // host-level sentinel might be the one carrying out a given kill-command,
+  // so either credential is accepted here — whichever one presents a key
+  // that actually matches this asset.
+  async function eitherKeyAuth(req, res, next) {
+    const assetId = Number(req.params.id);
+    const presentedKey = req.headers['x-agent-key'];
+    if (!Number.isInteger(assetId) || !presentedKey) {
+      return res.status(401).json({ error: 'Missing credentials' });
+    }
+    const asset = await ApplicationAsset.findByPk(assetId);
+    if (!asset) return res.status(401).json({ error: 'Invalid key' });
+    const matchesAgent = asset.agentKeyHash && verifyAgentKey(presentedKey, asset.agentKeyHash);
+    const matchesSentinel = asset.sentinelKeyHash && verifyAgentKey(presentedKey, asset.sentinelKeyHash);
+    if (!matchesAgent && !matchesSentinel) {
+      return res.status(401).json({ error: 'Invalid key' });
     }
     req.asset = asset;
     next();
@@ -76,6 +115,58 @@ export default ({ models, authMiddleware, notifyTicket }) => {
 
     // Shown once — the backend only ever stores a hash from here on.
     return res.status(201).json({ agentKey: rawKey, warning: 'This key will not be shown again. Store it securely.' });
+  });
+
+  router.post('/:id/sentinel-key', authMiddleware, adminOnly, param('id').isInt(), async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+    const asset = await ApplicationAsset.findByPk(req.params.id);
+    if (!asset) return res.status(404).json({ error: 'Asset not found' });
+
+    const rawKey = generateAgentKey();
+    await asset.update({
+      sentinelMode: 'shadow',
+      sentinelKeyHash: hashAgentKey(rawKey),
+      lastSentinelHeartbeatAt: null,
+    });
+
+    await AuditLog.create({
+      entityType: 'application_asset',
+      entityId: String(asset.id),
+      actor: req.user?.username || 'unknown',
+      actorRole: req.user?.role || null,
+      action: 'asset.sentinel_key_issued',
+      ipAddress: req.ip,
+      details: JSON.stringify({ assetId: asset.id }),
+    });
+
+    return res.status(201).json({ sentinelKey: rawKey, warning: 'This key will not be shown again. Store it securely.' });
+  });
+
+  router.patch('/:id/sentinel-mode', authMiddleware, adminOnly, param('id').isInt(), body('mode').isIn(['shadow', 'active']), async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+    const asset = await ApplicationAsset.findByPk(req.params.id);
+    if (!asset) return res.status(404).json({ error: 'Asset not found' });
+    if (!asset.sentinelKeyHash) return res.status(409).json({ error: 'No sentinel installed on this asset yet.' });
+    if (req.body.mode === 'active' && !asset.lastSentinelHeartbeatAt) {
+      return res.status(409).json({ error: 'No sentinel heartbeat received yet. Confirm the sentinel is installed and running before promoting to active.' });
+    }
+
+    await asset.update({ sentinelMode: req.body.mode });
+    await AuditLog.create({
+      entityType: 'application_asset',
+      entityId: String(asset.id),
+      actor: req.user?.username || 'unknown',
+      actorRole: req.user?.role || null,
+      action: `asset.sentinel_mode_set_${req.body.mode}`,
+      ipAddress: req.ip,
+      details: JSON.stringify({ assetId: asset.id }),
+    });
+
+    return res.json({ sentinelMode: asset.sentinelMode });
   });
 
   router.post(
@@ -259,6 +350,10 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       verificationStatus: asset.verificationStatus,
       lastVerifiedAt: asset.lastVerifiedAt,
       lastHeartbeatAt: asset.lastHeartbeatAt,
+      hasSentinelKey: Boolean(asset.sentinelKeyHash),
+      sentinelMode: asset.sentinelMode,
+      lastSentinelHeartbeatAt: asset.lastSentinelHeartbeatAt,
+      lastKnownOpenPorts: asset.lastKnownOpenPorts,
     });
   });
 
@@ -271,6 +366,68 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     // round trip — mode changes take effect on the agent's next heartbeat.
     return res.json({ acknowledged: true, mode: req.asset.enforcementMode });
   });
+
+  // --- Sentinel-facing (sentinel-key auth, not JWT) ---
+
+  router.post(
+    '/:id/sentinel-heartbeat',
+    sentinelAuth,
+    body('openPorts').optional().isArray(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const updates = { lastSentinelHeartbeatAt: new Date() };
+      if (Array.isArray(req.body.openPorts)) updates.lastKnownOpenPorts = req.body.openPorts;
+      await req.asset.update(updates);
+
+      return res.json({ acknowledged: true, mode: req.asset.sentinelMode });
+    },
+  );
+
+  router.post(
+    '/:id/sentinel-report',
+    sentinelAuth,
+    body('category').isString().trim().isLength({ min: 1, max: 64 }),
+    body('severity').optional().isIn(['low', 'medium', 'high', 'critical']),
+    body('title').optional().isString().trim().isLength({ max: 255 }),
+    body('description').optional().isString().trim().isLength({ max: 5000 }),
+    body('sourceIp').optional().isString().trim().isLength({ max: 64 }),
+    body('blocked').optional().isBoolean(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      // Real network-layer findings from the sentinel's own port/connection
+      // monitoring — routed through the same ingestion pipeline as every
+      // other detector (embedded agent, Wazuh/Suricata/Prometheus connectors),
+      // so dedup/scoring/auto-ticketing all apply consistently.
+      const { category, severity, title, description, evidence, sourceIp, blocked } = req.body;
+
+      const result = await ingestFinding({
+        models: { ApplicationAsset, SecurityFinding, Ticket, TicketHistory },
+        notifyTicket,
+        sourceTool: 'commandcentre-sentinel',
+        detectionMode: 'active',
+        category,
+        severity: severity || 'medium',
+        title: title || `Network-layer threat on ${req.asset.name}`,
+        description: description || `Sentinel flagged network activity${blocked ? ' and isolated the source at the firewall.' : ' (shadow mode — not isolated).'}`,
+        evidence: evidence || JSON.stringify({ sourceIp }),
+        appName: req.asset.name,
+        appUrl: req.asset.baseUrl,
+        environment: req.asset.environment,
+        // ingestFinding defaults affectedAssetRef to the app's baseUrl, which
+        // is null for a router/server/computer — always give it something
+        // real to point at instead.
+        affectedAssetRef: req.asset.baseUrl || req.asset.ipAddress || String(req.asset.id),
+        affectedAssetType: req.asset.assetType,
+        requiresManualConfirmation: !blocked,
+      });
+
+      return res.status(201).json({ acknowledged: true, findingId: result?.finding?.id || null });
+    },
+  );
 
   router.post(
     '/:id/agent-report',
@@ -296,7 +453,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       } = req.body;
 
       const result = await ingestFinding({
-        models: { ApplicationAsset, SecurityFinding },
+        models: { ApplicationAsset, SecurityFinding, Ticket, TicketHistory },
         notifyTicket,
         sourceTool: 'commandcentre-agent',
         detectionMode: 'active',
@@ -394,7 +551,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     },
   );
 
-  router.get('/:id/commands/pending', agentAuth, async (req, res) => {
+  router.get('/:id/commands/pending', eitherKeyAuth, async (req, res) => {
     const commands = await AgentCommand.findAll({
       where: { applicationAssetId: req.asset.id, status: 'pending' },
       order: [['createdAt', 'ASC']],
@@ -402,7 +559,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     return res.json(commands);
   });
 
-  router.post('/:id/commands/:commandId/ack', agentAuth, param('commandId').isInt(), async (req, res) => {
+  router.post('/:id/commands/:commandId/ack', eitherKeyAuth, param('commandId').isInt(), async (req, res) => {
     const command = await AgentCommand.findOne({ where: { id: req.params.commandId, applicationAssetId: req.asset.id } });
     if (!command) return res.status(404).json({ error: 'Command not found' });
     await command.update({ status: 'acknowledged', acknowledgedAt: new Date() });

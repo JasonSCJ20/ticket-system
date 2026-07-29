@@ -187,6 +187,7 @@ export const initModels = async () => {
     await ensureColumn('ApplicationAssets', 'sentinelKeyHash', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('ApplicationAssets', 'sentinelMode', { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'shadow' });
     await ensureColumn('ApplicationAssets', 'lastSentinelHeartbeatAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('ApplicationAssets', 'lastKnownOpenPorts', { type: DataTypes.JSON, allowNull: true });
     await ensureNullable('ApplicationAssets', 'baseUrl');
     await ensureColumn('AgentCommands', 'externalRef', { type: DataTypes.STRING(255), allowNull: true });
     await ensureColumn('AgentCommands', 'failureReason', { type: DataTypes.STRING(500), allowNull: true });

@@ -8,6 +8,8 @@ import {
   pollVerification,
   setEnforcementMode,
   queueAgentCommand,
+  issueSentinelKey,
+  setSentinelMode,
 } from '../api/assetEnforcement.js';
 
 const VERIFICATION_TONE = { verified: 'ok', pending: 'high', degraded: 'high', failed: 'critical', not_configured: 'low' };
@@ -40,6 +42,7 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
   const [busy, setBusy] = useState(false);
   const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [issuedKey, setIssuedKey] = useState(null);
+  const [issuedSentinelKey, setIssuedSentinelKey] = useState(null);
   const [edgeToken, setEdgeToken] = useState('');
   const [edgeZoneId, setEdgeZoneId] = useState('');
   const [verifyState, setVerifyState] = useState(null); // 'pending' | 'verified' | 'timeout' | 'unsupported'
@@ -60,6 +63,39 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
       onChanged();
     } catch (err) {
       notifyError(err, 'Failed to issue an agent key.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleIssueSentinelKey = async () => {
+    setBusy(true);
+    clear();
+    try {
+      const result = await issueSentinelKey(asset.id);
+      setIssuedSentinelKey(result.sentinelKey);
+      notifySuccess(result.warning);
+      onChanged();
+    } catch (err) {
+      notifyError(err, 'Failed to issue a sentinel key.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePromoteSentinel = async (mode) => {
+    setBusy(true);
+    clear();
+    try {
+      await setSentinelMode(asset.id, mode);
+      notifySuccess(`Sentinel mode set to ${mode}.`);
+      onChanged();
+    } catch (err) {
+      if (err.status === 409) {
+        notifyError({ message: err.message || 'No sentinel heartbeat received yet — confirm the sentinel service is installed and running.' });
+      } else {
+        notifyError(err, 'Failed to change sentinel mode.');
+      }
     } finally {
       setBusy(false);
     }
@@ -264,6 +300,54 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
         </div>
       )}
 
+      <div style={{ marginBottom: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+        <p style={{ fontSize: 11.5, fontWeight: 700, margin: '0 0 4px' }}>Host-level sentinel</p>
+        <p style={{ fontSize: 10, color: 'var(--text-muted)', margin: '0 0 8px' }}>
+          Real port/connection visibility and firewall-level isolation on this asset's own host — runs alongside (not
+          instead of) the enforcement model above. Works for any asset type, including routers and bare servers with
+          no web endpoint at all.
+        </p>
+
+        {!asset.hasSentinelKey && (
+          <button disabled={busy} onClick={handleIssueSentinelKey} style={btnStyle('var(--accent)')}>
+            Issue sentinel key
+          </button>
+        )}
+
+        {issuedSentinelKey && (
+          <div style={{ margin: '10px 0', border: '1px solid var(--warning)', borderRadius: 8, padding: 10 }}>
+            <p style={{ fontSize: 11, fontWeight: 700, color: 'var(--warning)', margin: '0 0 6px' }}>
+              Sentinel key — shown once, store it now
+            </p>
+            <code style={{ display: 'block', fontSize: 11, wordBreak: 'break-all', background: 'var(--surface-2)', padding: 8, borderRadius: 6 }}>
+              {issuedSentinelKey}
+            </code>
+          </div>
+        )}
+
+        {asset.hasSentinelKey && (
+          <>
+            <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
+              <span>Last heartbeat: {asset.lastSentinelHeartbeatAt ? new Date(asset.lastSentinelHeartbeatAt).toLocaleString() : 'never'}</span>
+            </div>
+            {asset.lastKnownOpenPorts?.length > 0 && (
+              <p style={{ fontSize: 10.5, color: 'var(--text-muted)', margin: '0 0 10px' }}>
+                Open ports: {asset.lastKnownOpenPorts.join(', ')}
+              </p>
+            )}
+            {asset.sentinelMode === 'shadow' ? (
+              <button disabled={busy || !asset.lastSentinelHeartbeatAt} onClick={() => handlePromoteSentinel('active')} style={btnStyle('var(--success)')}>
+                Promote sentinel to active
+              </button>
+            ) : (
+              <button disabled={busy} onClick={() => handlePromoteSentinel('shadow')} style={btnStyle('var(--warning)', true)}>
+                Revert sentinel to shadow
+              </button>
+            )}
+          </>
+        )}
+      </div>
+
       {asset.enforcementModel !== 'none' && (
         <>
           <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginBottom: 14 }}>
@@ -286,32 +370,35 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
             )}
           </div>
 
-          <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-            <p style={{ fontSize: 11, fontWeight: 700, margin: '0 0 8px' }}>Send a kill command</p>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-              <select value={cmdAction} onChange={(e) => setCmdAction(e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: '0 0 auto' }}>
-                <option value="block_ip">block_ip</option>
-                {asset.enforcementModel !== 'edge' && <option value="block_session">block_session</option>}
-                <option value="unblock_ip">unblock_ip</option>
-              </select>
-              <input
-                value={cmdTarget}
-                onChange={(e) => setCmdTarget(e.target.value)}
-                placeholder="IP or session id"
-                style={{ ...inputStyle, marginBottom: 0, flex: 1 }}
-              />
-            </div>
-            <input
-              value={cmdReason}
-              onChange={(e) => setCmdReason(e.target.value)}
-              placeholder="Reason (optional, audited)"
-              style={inputStyle}
-            />
-            <button disabled={busy} onClick={handleQueueCommand} style={btnStyle('var(--accent)')}>
-              Queue command
-            </button>
-          </div>
         </>
+      )}
+
+      {(asset.enforcementModel !== 'none' || asset.hasSentinelKey) && (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+          <p style={{ fontSize: 11, fontWeight: 700, margin: '0 0 8px' }}>Send a kill command</p>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <select value={cmdAction} onChange={(e) => setCmdAction(e.target.value)} style={{ ...inputStyle, marginBottom: 0, flex: '0 0 auto' }}>
+              <option value="block_ip">block_ip</option>
+              {asset.enforcementModel === 'agent' && <option value="block_session">block_session</option>}
+              <option value="unblock_ip">unblock_ip</option>
+            </select>
+            <input
+              value={cmdTarget}
+              onChange={(e) => setCmdTarget(e.target.value)}
+              placeholder="IP or session id"
+              style={{ ...inputStyle, marginBottom: 0, flex: 1 }}
+            />
+          </div>
+          <input
+            value={cmdReason}
+            onChange={(e) => setCmdReason(e.target.value)}
+            placeholder="Reason (optional, audited)"
+            style={inputStyle}
+          />
+          <button disabled={busy} onClick={handleQueueCommand} style={btnStyle('var(--accent)')}>
+            Queue command
+          </button>
+        </div>
       )}
     </Card>
   );

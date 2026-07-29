@@ -1158,6 +1158,13 @@ async function setup() {
         AuditLog: auditLogModel,
         AgentCommand: agentCommandModel,
         SecurityFinding: securityFindingModel,
+        // ingestFinding()'s auto-ticket-creation path (fires for any
+        // high/critical finding that didn't require manual confirmation —
+        // i.e. one the agent/sentinel already acted on automatically) needs
+        // these; without them it throws on the very findings that matter
+        // most. Never actually exercised before the sentinel route existed.
+        Ticket: ticketModel,
+        TicketHistory: ticketHistoryModel,
       },
       authMiddleware,
       notifyTicket: notify,

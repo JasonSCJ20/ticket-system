@@ -54,5 +54,8 @@ export default (sequelize) => {
     // firewall rules.
     sentinelMode: { type: DataTypes.ENUM('shadow', 'active'), allowNull: false, defaultValue: 'shadow' },
     lastSentinelHeartbeatAt: { type: DataTypes.DATE, allowNull: true },
+    // The sentinel's own port/service inventory of its host, refreshed on
+    // each heartbeat — informational visibility, not itself a finding.
+    lastKnownOpenPorts: { type: DataTypes.JSON, allowNull: true },
   });
 };
