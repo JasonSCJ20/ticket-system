@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTcpTable, listListeningPorts, listActiveConnections } from '../src/portInventory.js';
+import { parseTcpTable, listListeningPorts, listActiveConnections, listOutboundConnections } from '../src/portInventory.js';
 
 // A real-shaped /proc/net/tcp fixture: header row + a LISTEN on port 22 (0x16),
 // an ESTABLISHED connection from a remote host, and a TIME_WAIT entry that
@@ -35,6 +35,30 @@ describe('listActiveConnections', () => {
     const active = listActiveConnections(rows);
     expect(active).toHaveLength(1);
     expect(active[0].remoteIp).toBe('192.168.1.2');
+  });
+});
+
+describe('listOutboundConnections', () => {
+  it('excludes an ESTABLISHED row whose local port is one this host listens on (inbound)', () => {
+    const rows = [
+      { localIp: '10.0.0.1', localPort: 443, remoteIp: '203.0.113.9', remotePort: 51234, state: 'ESTABLISHED' },
+    ];
+    expect(listOutboundConnections(rows, [443])).toEqual([]);
+  });
+
+  it('includes an ESTABLISHED row whose local port is an ephemeral one this host is NOT listening on (outbound)', () => {
+    const rows = [
+      { localIp: '10.0.0.1', localPort: 54221, remoteIp: '198.51.100.7', remotePort: 443, state: 'ESTABLISHED' },
+    ];
+    expect(listOutboundConnections(rows, [22, 443])).toHaveLength(1);
+  });
+
+  it('ignores non-ESTABLISHED rows and the 0.0.0.0 placeholder remote', () => {
+    const rows = [
+      { localIp: '10.0.0.1', localPort: 54221, remoteIp: '0.0.0.0', remotePort: 0, state: 'ESTABLISHED' },
+      { localIp: '10.0.0.1', localPort: 54222, remoteIp: '198.51.100.7', remotePort: 443, state: 'TIME_WAIT' },
+    ];
+    expect(listOutboundConnections(rows, [])).toEqual([]);
   });
 });
 

@@ -68,3 +68,14 @@ export function listListeningPorts(rows = readTcpTables()) {
 export function listActiveConnections(rows = readTcpTables()) {
   return rows.filter((row) => row.state === 'ESTABLISHED' && row.remoteIp !== '0.0.0.0');
 }
+
+// A connection this host initiated outward (as opposed to one a remote peer
+// initiated inbound) always has a local port that ISN'T one of this host's
+// own listening ports — /proc/net/tcp doesn't record direction directly, but
+// that distinction reconstructs it reliably.
+export function listOutboundConnections(rows, listeningPorts) {
+  const listening = new Set(listeningPorts);
+  return rows.filter(
+    (row) => row.state === 'ESTABLISHED' && row.remoteIp !== '0.0.0.0' && !listening.has(row.localPort),
+  );
+}

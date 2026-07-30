@@ -49,5 +49,33 @@ export function createFirewall({ run = execFile } = {}) {
     return ips;
   }
 
-  return { blockIp, unblockIp, listBlockedIps };
+  // Same idea as blockIp/unblockIp but on the OUTPUT chain, matching by
+  // destination (-d) instead of source (-s) — for isolating a confirmed
+  // outbound C2/beaconing destination rather than an inbound attacker.
+  async function blockOutboundIp(ip) {
+    assertValidIp(ip);
+    await run('iptables', ['-I', 'OUTPUT', '-d', ip, '-m', 'comment', '--comment', RULE_COMMENT, '-j', 'DROP']);
+  }
+
+  async function unblockOutboundIp(ip) {
+    assertValidIp(ip);
+    try {
+      await run('iptables', ['-D', 'OUTPUT', '-d', ip, '-m', 'comment', '--comment', RULE_COMMENT, '-j', 'DROP']);
+    } catch (err) {
+      if (!/No chain\/target\/match|Bad rule/i.test(err.stderr || err.message || '')) throw err;
+    }
+  }
+
+  async function listBlockedOutboundIps() {
+    const { stdout } = await run('iptables', ['-S', 'OUTPUT']);
+    const ips = [];
+    for (const line of stdout.split('\n')) {
+      if (!line.includes(RULE_COMMENT)) continue;
+      const match = line.match(/-d (\d{1,3}(?:\.\d{1,3}){3})/);
+      if (match) ips.push(match[1]);
+    }
+    return ips;
+  }
+
+  return { blockIp, unblockIp, listBlockedIps, blockOutboundIp, unblockOutboundIp, listBlockedOutboundIps };
 }

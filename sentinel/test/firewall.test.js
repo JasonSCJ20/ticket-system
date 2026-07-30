@@ -59,4 +59,40 @@ describe('createFirewall', () => {
     const blocked = await firewall.listBlockedIps();
     expect(blocked).toEqual(['203.0.113.9']);
   });
+
+  it('blockOutboundIp runs iptables -I OUTPUT matching by destination', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    const firewall = createFirewall({ run });
+
+    await firewall.blockOutboundIp('198.51.100.77');
+
+    expect(run).toHaveBeenCalledWith('iptables', [
+      '-I', 'OUTPUT', '-d', '198.51.100.77', '-m', 'comment', '--comment', 'commandcentre-sentinel', '-j', 'DROP',
+    ]);
+  });
+
+  it('unblockOutboundIp runs the matching -D removal on OUTPUT', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    const firewall = createFirewall({ run });
+
+    await firewall.unblockOutboundIp('198.51.100.77');
+
+    expect(run).toHaveBeenCalledWith('iptables', [
+      '-D', 'OUTPUT', '-d', '198.51.100.77', '-m', 'comment', '--comment', 'commandcentre-sentinel', '-j', 'DROP',
+    ]);
+  });
+
+  it('listBlockedOutboundIps parses only our tagged rules out of OUTPUT -S output', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: [
+        '-P OUTPUT ACCEPT',
+        '-A OUTPUT -d 198.51.100.77/32 -m comment --comment commandcentre-sentinel -j DROP',
+        '-A OUTPUT -d 203.0.113.1/32 -j DROP',
+      ].join('\n'),
+      stderr: '',
+    });
+    const firewall = createFirewall({ run });
+
+    expect(await firewall.listBlockedOutboundIps()).toEqual(['198.51.100.77']);
+  });
 });

