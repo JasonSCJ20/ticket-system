@@ -3,7 +3,12 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('ApplicationAsset', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    name: { type: DataTypes.STRING(128), allowNull: false, unique: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
+    // Not globally unique — two different customer organizations may
+    // legitimately both name an asset the same thing. Scoped uniqueness
+    // (per-organization) is not yet enforced at the DB level; a known,
+    // low-risk gap for this phase (naming collision, not a security issue).
+    name: { type: DataTypes.STRING(128), allowNull: false },
     // Not every asset has a web endpoint — a router or bare server has an IP
     // but no baseUrl, so this can no longer be required. At least one of
     // baseUrl/ipAddress is enforced at the route-validation layer instead.

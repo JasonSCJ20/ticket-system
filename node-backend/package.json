@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "test": "cross-env NODE_ENV=test DATABASE_URL=sqlite://./ticket_system_node.test.db ASSET_CREDENTIAL_ENCRYPTION_KEY=test-only-encryption-key-not-for-production-use node --experimental-vm-modules node_modules/jest/bin/jest.js --forceExit"
+    "test": "cross-env NODE_ENV=test DATABASE_URL=sqlite://./ticket_system_node.test.db ASSET_CREDENTIAL_ENCRYPTION_KEY=test-only-encryption-key-not-for-production-use node --experimental-vm-modules node_modules/jest/bin/jest.js --forceExit --runInBand",
+    "test:coverage": "cross-env NODE_ENV=test DATABASE_URL=sqlite://./ticket_system_node.test.db ASSET_CREDENTIAL_ENCRYPTION_KEY=test-only-encryption-key-not-for-production-use node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage --forceExit --runInBand"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -21,8 +22,10 @@
     "node-cron": "^3.0.2",
     "node-telegram-bot-api": "^0.67.0",
     "nodemailer": "^9.0.3",
+    "pdfkit": "^0.19.1",
     "pg": "^8.13.1",
     "pg-hstore": "^2.3.4",
+    "pino": "^10.3.1",
     "sequelize": "^6.33.0",
     "speakeasy": "^2.0.0",
     "sqlite3": "^6.0.1",

@@ -1,6 +1,10 @@
 import { DataTypes } from 'sequelize';
 
-// Singleton row (id always 1) backing CommandCentre's own kill-switch tiers.
+// One row per organization backing that tenant's own Fortress kill-switch
+// tiers (previously a single global singleton, id always 1 — every
+// organization now gets its own independent lockdown/revoke/IP-block state,
+// since one customer's incident response must never affect another's
+// sessions or API access).
 // `globalRevokeAfter` implements instant "sign everyone out" for a stateless
 // JWT system: any token with an `iat` before this timestamp is rejected by
 // the auth middleware, without needing to enumerate or track individual
@@ -8,7 +12,8 @@ import { DataTypes } from 'sequelize';
 // full-lockdown tier — never set automatically by a detection.
 export default (sequelize) => {
   return sequelize.define('SecurityState', {
-    id: { type: DataTypes.INTEGER, primaryKey: true, defaultValue: 1 },
+    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false, unique: true },
     globalRevokeAfter: { type: DataTypes.DATE, allowNull: true },
     globalRevokeReason: { type: DataTypes.STRING(500), allowNull: true },
     globalRevokeBy: { type: DataTypes.STRING(128), allowNull: true },

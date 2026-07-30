@@ -3,6 +3,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('TicketResolutionReport', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     ticketId: { type: DataTypes.INTEGER, allowNull: false },
     issueType: { type: DataTypes.STRING(64), allowNull: false },
     issueSummary: { type: DataTypes.TEXT, allowNull: false },

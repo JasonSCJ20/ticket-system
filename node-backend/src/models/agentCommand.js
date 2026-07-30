@@ -7,6 +7,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('AgentCommand', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     applicationAssetId: { type: DataTypes.INTEGER, allowNull: false },
     action: { type: DataTypes.ENUM('block_ip', 'block_session', 'unblock_ip'), allowNull: false },
     target: { type: DataTypes.STRING(255), allowNull: false },

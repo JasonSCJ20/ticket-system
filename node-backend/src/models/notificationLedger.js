@@ -5,6 +5,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('NotificationLedger', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     userId: { type: DataTypes.INTEGER, allowNull: false },
     channel: { type: DataTypes.STRING(16), allowNull: false, defaultValue: 'telegram' }, // 'telegram' | 'email'
     subject: { type: DataTypes.STRING(255), allowNull: true },

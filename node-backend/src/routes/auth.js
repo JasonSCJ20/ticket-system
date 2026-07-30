@@ -1,5 +1,6 @@
 import express from 'express';
 import { isValidScjId, validatePassword } from '../utils.js';
+import { logger } from '../logger.js';
 import {
   AUDIENCE_CODE_LABELS,
   derivePrimaryDepartment,
@@ -53,6 +54,8 @@ export default function authRouteFactory({
   clearAuthAttemptState,
   writePublicAudit,
   sendEmailNotification,
+  runAsPlatformAdmin,
+  defaultOrganizationId,
 }) {
   const router = express.Router();
 
@@ -71,7 +74,7 @@ export default function authRouteFactory({
       .custom((value) => value === undefined || value === null || Array.isArray(value))
       .withMessage('Select one or two operational teams'),
     body('username').optional().isString().trim().isLength({ min: 3, max: 255 }),
-    async (req, res) => {
+    async (req, res) => runAsPlatformAdmin(async () => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
@@ -122,6 +125,12 @@ export default function authRouteFactory({
 
         const passwordHash = bcrypt.hashSync(req.body.password, 10);
         const created = await userModel.create({
+          // Self-registration is still gated to the company's own email
+          // domain (see isAllowedRegistrationEmail above) — a real
+          // organization-selection/invite flow for reselling to other
+          // companies is Phase 2, not built yet. Every self-registered
+          // account goes to the one default organization for now.
+          organizationId: defaultOrganizationId,
           username,
           name,
           surname,
@@ -157,16 +166,16 @@ export default function authRouteFactory({
         if (error?.name === 'SequelizeUniqueConstraintError') {
           return res.status(409).json({ error: getRegisterConflictMessage(error) });
         }
-        console.error('Account registration failed:', error?.message || error);
+        logger.error({ err: error }, 'Account registration failed');
         return res.status(500).json({ error: 'Account registration failed due to a server error' });
       }
-    },
+    }),
   );
 
   router.post(
     '/auth/forgot-username',
     body('email').isEmail().normalizeEmail(),
-    async (req, res) => {
+    async (req, res) => runAsPlatformAdmin(async () => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
@@ -223,13 +232,13 @@ export default function authRouteFactory({
         ok: true,
         message: 'If an account exists for this email, the username has been sent to it.',
       });
-    },
+    }),
   );
 
   router.post(
     '/auth/forgot-password/request',
     body('email').isEmail().normalizeEmail(),
-    async (req, res) => {
+    async (req, res) => runAsPlatformAdmin(async () => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
@@ -292,7 +301,7 @@ export default function authRouteFactory({
         ok: true,
         message: 'If account details were valid, a reset code has been issued by email.',
       });
-    },
+    }),
   );
 
   router.post(
@@ -300,7 +309,7 @@ export default function authRouteFactory({
     body('email').isEmail().normalizeEmail(),
     body('resetCode').isString().trim().isLength({ min: 4, max: 16 }),
     body('newPassword').isString().isLength({ min: 12, max: 128 }),
-    async (req, res) => {
+    async (req, res) => runAsPlatformAdmin(async () => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
@@ -383,7 +392,7 @@ export default function authRouteFactory({
       });
 
       return res.json({ ok: true, message: 'Password reset successful. You can now log in.' });
-    },
+    }),
   );
 
   router.post(
@@ -391,7 +400,7 @@ export default function authRouteFactory({
     body('username').isString(),
     body('password').isString(),
     body('mfaCode').optional().isString().trim().isLength({ min: 6, max: 8 }),
-    async (req, res) => {
+    async (req, res) => runAsPlatformAdmin(async () => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
         return res.status(422).json({ errors: errors.array() });
@@ -432,6 +441,7 @@ export default function authRouteFactory({
             [Op.or]: [{ username: config.ADMIN_USERNAME }, { name: config.ADMIN_USERNAME }],
           },
           defaults: {
+            organizationId: defaultOrganizationId,
             username: config.ADMIN_USERNAME,
             name: config.ADMIN_USERNAME,
             surname: null,
@@ -495,7 +505,7 @@ export default function authRouteFactory({
       });
 
       const token = jwt.sign(
-        { sub: user.id, username: user.username || user.name, role: user.role, audienceCode, jti },
+        { sub: user.id, organizationId: user.organizationId, username: user.username || user.name, role: user.role, audienceCode, jti },
         config.SECRET_KEY,
         { expiresIn: config.ACCESS_TOKEN_TTL || '15m' },
       );
@@ -504,9 +514,43 @@ export default function authRouteFactory({
         access_token: token,
         token_type: 'bearer',
         mfaEnabled: Boolean(user.mfaEnabled),
+        mustChangePassword: Boolean(user.mustChangePassword),
         profileCompletionRequired: !profileState.isComplete,
         profileCompletionIssues: profileState.issues,
       });
+    }),
+  );
+
+  // Not gated behind requireCompletedProfile (see app.js) — a user whose
+  // account is stuck behind the mustChangePassword 428 must still be able
+  // to reach this one endpoint to actually fix it.
+  router.post(
+    '/auth/change-password',
+    authMiddleware,
+    body('currentPassword').isString(),
+    body('newPassword').isString().isLength({ min: 12, max: 128 }),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const passwordValidation = validatePassword(req.body.newPassword);
+      if (!passwordValidation.isValid) {
+        return res.status(422).json({ error: passwordValidation.message });
+      }
+
+      const user = await userModel.findByPk(req.user.sub);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      if (!user.password_hash || !bcrypt.compareSync(req.body.currentPassword, user.password_hash)) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+
+      await user.update({
+        password_hash: bcrypt.hashSync(req.body.newPassword, 10),
+        mustChangePassword: false,
+      });
+
+      return res.json({ ok: true, message: 'Password changed successfully.' });
     },
   );
 

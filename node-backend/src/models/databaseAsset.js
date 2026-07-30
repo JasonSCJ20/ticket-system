@@ -3,7 +3,8 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('DatabaseAsset', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    name: { type: DataTypes.STRING(128), allowNull: false, unique: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
+    name: { type: DataTypes.STRING(128), allowNull: false },
     engine: { type: DataTypes.ENUM('postgresql', 'mysql', 'mssql', 'oracle', 'mongodb', 'redis', 'other'), allowNull: false, defaultValue: 'postgresql' },
     environment: { type: DataTypes.ENUM('on_prem', 'cloud', 'hybrid'), allowNull: false, defaultValue: 'on_prem' },
     host: { type: DataTypes.STRING(255), allowNull: false },

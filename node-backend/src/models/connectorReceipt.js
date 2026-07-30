@@ -3,6 +3,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('ConnectorReceipt', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     connectorName: { type: DataTypes.STRING(64), allowNull: false },
     dedupeKey: { type: DataTypes.STRING(128), allowNull: false, unique: true },
     sourceIp: { type: DataTypes.STRING(64), allowNull: true },

@@ -1,20 +1,26 @@
 import { DETECTION_STACK } from './findingIntelligence.js';
 
 // ─── Fidelity / cadence metadata keyed by domain ─────────────────────────────
-// fidelityLevel: 'native' = real integration, 'simulated' = heuristic, 'heartbeat-only' = no direct execution
+// fidelityLevel: 'native' = real integration (self-scan or a real inbound
+// connector), 'heartbeat-only' = liveness signal without full execution,
+// 'unavailable' = no real execution path exists yet — the sweep records
+// this honestly as "skipped", it never fabricates a finding for it.
+// 'simulated' no longer appears anywhere: as of the real-scanner rework,
+// every tool here is either genuinely real or explicitly marked
+// unavailable — there is no more dice-roll middle ground.
 const DOMAIN_META = {
-  'network-ids':      { fidelityLevel: 'native',         cadenceMinutes: 12 },
-  'network-analytics':{ fidelityLevel: 'native',         cadenceMinutes: 10 },
-  'host-siem':        { fidelityLevel: 'simulated',      cadenceMinutes: 5  },
-  'runtime-security': { fidelityLevel: 'simulated',      cadenceMinutes: 5  },
-  'availability':     { fidelityLevel: 'heartbeat-only', cadenceMinutes: 5  },
-  'exposure-scanning':{ fidelityLevel: 'simulated',      cadenceMinutes: 30 },
-  'dast':             { fidelityLevel: 'simulated',      cadenceMinutes: 30 },
-  'sast':             { fidelityLevel: 'simulated',      cadenceMinutes: 30 },
-  'container-iac':    { fidelityLevel: 'native',         cadenceMinutes: 20 },
-  'secrets':          { fidelityLevel: 'simulated',      cadenceMinutes: 30 },
-  'supply-chain':     { fidelityLevel: 'simulated',      cadenceMinutes: 30 },
-  'infra-vuln-scan':  { fidelityLevel: 'simulated',      cadenceMinutes: 30 },
+  'network-ids':      { fidelityLevel: 'native',      cadenceMinutes: 12 }, // Suricata — real via its inbound connector
+  'network-analytics':{ fidelityLevel: 'unavailable',  cadenceMinutes: 10 }, // Zeek — no real execution path (needs packet-capture taps)
+  'host-siem':        { fidelityLevel: 'native',      cadenceMinutes: 5  }, // Wazuh — real via its inbound connector
+  'runtime-security': { fidelityLevel: 'unavailable',  cadenceMinutes: 5  }, // Falco — no real execution path (needs container runtime hooks)
+  'availability':     { fidelityLevel: 'heartbeat-only', cadenceMinutes: 5  }, // Prometheus — real via its inbound connector
+  'exposure-scanning':{ fidelityLevel: 'native',      cadenceMinutes: 30 }, // Nuclei — real active scan against each asset's baseUrl
+  'dast':             { fidelityLevel: 'unavailable',  cadenceMinutes: 30 }, // OWASP ZAP — no real execution path yet
+  'sast':             { fidelityLevel: 'native',      cadenceMinutes: 30 }, // Semgrep — real self-scan of the platform's own source
+  'container-iac':    { fidelityLevel: 'native',      cadenceMinutes: 20 }, // Trivy — real self-scan of the platform's own dependencies
+  'secrets':          { fidelityLevel: 'native',      cadenceMinutes: 30 }, // Gitleaks — real self-scan of the platform's own source
+  'supply-chain':     { fidelityLevel: 'unavailable',  cadenceMinutes: 30 }, // Dependency-Track — needs a running DT server, not built yet
+  'infra-vuln-scan':  { fidelityLevel: 'unavailable',  cadenceMinutes: 30 }, // OpenVAS — needs a full GVM install, not built yet
 };
 
 const detectionAssetMap = {
@@ -105,7 +111,10 @@ export const OPERATIONAL_TOOL_STACK = [
     domain: 'runtime-detection',
     capability: 'Runtime process and kernel-level threat detection for workloads and the command centre',
     openSource: true,
-    fidelityLevel: 'simulated',
+    // Not wired to anything real yet — @commandcentre/sentinel's own
+    // process/behavior monitor performs a comparable real function today,
+    // but as a separate reporting path, not through this registry entry.
+    fidelityLevel: 'unavailable',
     cadenceMinutes: 5,
     supportedAssetTypes: ['application', 'command_centre'],
     protectsCommandCentre: true,
@@ -114,7 +123,7 @@ export const OPERATIONAL_TOOL_STACK = [
 
 export const TOOL_REGISTRY = [
   ...DETECTION_STACK.map((tool) => {
-    const meta = DOMAIN_META[tool.domain] || { fidelityLevel: 'simulated', cadenceMinutes: 30 };
+    const meta = DOMAIN_META[tool.domain] || { fidelityLevel: 'unavailable', cadenceMinutes: 30 };
     return {
       id: toToolId(tool.name),
       name: tool.name,

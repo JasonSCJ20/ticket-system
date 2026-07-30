@@ -2,6 +2,7 @@
 import TelegramBot from 'node-telegram-bot-api';
 // Import configuration
 import { CONFIG } from './config.js';
+import { logger } from './logger.js';
 
 // Create the bot only when a token is configured so startup does not fail in environments without Telegram.
 export const bot = CONFIG.TELEGRAM_BOT_TOKEN
@@ -26,7 +27,7 @@ export async function sendTelegramMessage(chatId, text, options = {}) {
       return true;
     } catch (error) {
       const finalAttempt = attempt >= retries;
-      console.error(`Telegram delivery failed for chat ${chatId} on attempt ${attempt + 1}:`, error?.message || error);
+      logger.error({ err: error, chatId, attempt: attempt + 1 }, 'Telegram delivery failed');
       if (finalAttempt) return false;
       await delay(750 * (attempt + 1));
     }

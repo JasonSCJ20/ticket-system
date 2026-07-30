@@ -3,6 +3,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('User', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     username: { type: DataTypes.STRING, unique: true, allowNull: true },
     name: { type: DataTypes.STRING, allowNull: false },
     surname: { type: DataTypes.STRING, allowNull: true },
@@ -15,8 +16,17 @@ export default (sequelize) => {
     telegramNumber: { type: DataTypes.STRING(32), unique: true, allowNull: true },
     telegramChatId: { type: DataTypes.STRING(32), unique: true, allowNull: true },
     telegramId: { type: DataTypes.INTEGER, unique: true, allowNull: true },
+    // A plain string, not an ENUM — 'analyst' (default), 'admin', 'owner'
+    // (see the owner-scoping RBAC work), and now 'platform_admin' (Scratch
+    // Solid Solutions staff managing tenants across the whole platform, not
+    // scoped to any one customer's data — see routes/platform.js).
     role: { type: DataTypes.STRING, defaultValue: 'analyst' },
     password_hash: { type: DataTypes.STRING, allowNull: true },
+    // Set true when a platform admin issues a temporary password for a new
+    // organization's first admin — forces a real password change before any
+    // other API access, so a known temp password issued over email/Telegram
+    // isn't usable indefinitely.
+    mustChangePassword: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     mfaEnabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     mfaSecret: { type: DataTypes.STRING(128), allowNull: true },
     resetPasswordCode: { type: DataTypes.STRING(16), allowNull: true },

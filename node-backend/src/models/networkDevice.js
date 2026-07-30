@@ -3,7 +3,8 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('NetworkDevice', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    name: { type: DataTypes.STRING(128), allowNull: false, unique: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
+    name: { type: DataTypes.STRING(128), allowNull: false },
     deviceType: { type: DataTypes.ENUM('router', 'switch', 'access_point', 'endpoint', 'firewall', 'server', 'other'), allowNull: false, defaultValue: 'endpoint' },
     ipAddress: { type: DataTypes.STRING(64), allowNull: true },
     macAddress: { type: DataTypes.STRING(64), allowNull: true },

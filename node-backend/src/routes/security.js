@@ -899,7 +899,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         capability: tool.capability,
         mode: tool.mode,
         openSource: tool.openSource,
-        fidelityLevel: tool.fidelityLevel || 'simulated',
+        fidelityLevel: tool.fidelityLevel || 'unavailable',
         cadenceMinutes: tool.cadenceMinutes || null,
       };
     });
@@ -1529,8 +1529,24 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json(networkVisibilityPayload);
   });
 
-  router.get('/applications', async (_req, res) => {
-    const applications = await ApplicationAsset.findAll({ order: [['name', 'ASC']] });
+  // The 'owner' role sees only assets they actually own — a real, enforced
+  // scope, not a UI-level filter a client could bypass by calling the API
+  // directly. Admin/analyst are unaffected: this only narrows what an asset
+  // owner specifically can see, it doesn't change existing internal-staff
+  // access. The JWT payload doesn't carry email (see routes/auth.js's
+  // jwt.sign call), so this looks the current value up from the DB rather
+  // than trusting a possibly-stale token claim.
+  const scopeAssetWhereToOwner = async (req, where = {}) => {
+    if (req.user?.role !== 'owner') return where;
+    const user = await User.findByPk(req.user.sub);
+    return { ...where, ownerEmail: user?.email || '__no_match__' };
+  };
+
+  router.get('/applications', async (req, res) => {
+    const applications = await ApplicationAsset.findAll({
+      where: await scopeAssetWhereToOwner(req),
+      order: [['name', 'ASC']],
+    });
     const withRuntime = await Promise.all(applications.map(async (app) => {
       const runtime = await probeApplicationRuntime(app.baseUrl);
       // Never spread the raw model — edgeCredentialSecret is a real,
@@ -1808,9 +1824,16 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
 
       const where = req.query.status ? { status: req.query.status } : {};
+      const assetWhere = await scopeAssetWhereToOwner(req);
+      const applicationInclude = { model: ApplicationAsset, as: 'application' };
+      // Only attach a `where` to the include when actually scoping to an
+      // owner — leaving it off otherwise preserves the existing join
+      // behavior for admin/analyst exactly as it was.
+      if (req.user?.role === 'owner') applicationInclude.where = assetWhere;
+
       const findings = await SecurityFinding.findAll({
         where,
-        include: [{ model: ApplicationAsset, as: 'application' }],
+        include: [applicationInclude],
         order: [['riskScore', 'DESC'], ['createdAt', 'DESC']],
         limit: 80,
       });
@@ -1974,7 +1997,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       id: tool.id,
       name: tool.name,
       engine: tool.engine,
-      fidelityLevel: tool.fidelityLevel || 'simulated',
+      fidelityLevel: tool.fidelityLevel || 'unavailable',
       cadenceMinutes: tool.cadenceMinutes || null,
       mode: tool.mode,
       domain: tool.domain,

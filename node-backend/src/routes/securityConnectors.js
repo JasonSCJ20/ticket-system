@@ -5,6 +5,7 @@ import { Op } from 'sequelize';
 import { body, validationResult } from 'express-validator';
 import { CONFIG } from '../config.js';
 import { ingestFinding } from '../services/securityEngine.js';
+import { runWithOrganization } from '../services/tenantContext.js';
 
 const router = express.Router();
 
@@ -95,8 +96,18 @@ function mapPrometheusSeverity(raw) {
   return 'medium';
 }
 
-export default ({ models, notifyTicket }) => {
+export default ({ models, notifyTicket, defaultOrganizationId }) => {
   const { ConnectorDeadLetter, ConnectorReceipt } = models;
+
+  // Connectors authenticate with one shared secret, not a per-tenant
+  // credential — there is no organization identity to derive from the
+  // request at all yet. Every inbound connector event is attributed to the
+  // one default organization for now. Real per-tenant connector secrets
+  // (so a second customer's own Wazuh/Suricata feed doesn't land in the
+  // first customer's data) are a follow-up, not built in this phase.
+  function withConnectorOrganization(req, res, next) {
+    runWithOrganization(defaultOrganizationId, next);
+  }
   const MAX_BATCH = 500;
 
   const connectorWindowMs = 60 * 1000;
@@ -158,7 +169,7 @@ export default ({ models, notifyTicket }) => {
     return { blocked: false };
   };
 
-  router.post('/wazuh/pull', wazuhLimiter, connectorAuth, async (_req, res) => {
+  router.post('/wazuh/pull', wazuhLimiter, connectorAuth, withConnectorOrganization, async (_req, res) => {
     const gate = await preflight(_req, res, 'wazuh');
     if (gate.blocked) return gate.response;
 
@@ -226,7 +237,7 @@ export default ({ models, notifyTicket }) => {
     return res.status(202).json({ ingested: alerts.length, created });
   });
 
-  router.post('/suricata/eve', suricataLimiter, connectorAuth, body('events').optional().isArray(), async (req, res) => {
+  router.post('/suricata/eve', suricataLimiter, connectorAuth, withConnectorOrganization, body('events').optional().isArray(), async (req, res) => {
     const gate = await preflight(req, res, 'suricata');
     if (gate.blocked) return gate.response;
 
@@ -278,7 +289,7 @@ export default ({ models, notifyTicket }) => {
     return res.status(202).json({ ingested: batch.length, created });
   });
 
-  router.post('/prometheus/alerts', prometheusLimiter, connectorAuth, async (req, res) => {
+  router.post('/prometheus/alerts', prometheusLimiter, connectorAuth, withConnectorOrganization, async (req, res) => {
     const gate = await preflight(req, res, 'prometheus');
     if (gate.blocked) return gate.response;
 

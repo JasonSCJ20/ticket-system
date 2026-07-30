@@ -2,6 +2,16 @@
 import { DataTypes, Sequelize } from 'sequelize';
 // Import configuration
 import { CONFIG } from '../config.js';
+import { computeAuditHash } from '../services/auditChain.js';
+import { applyTenantScoping } from '../services/tenantScoping.js';
+import { runAsPlatformAdmin } from '../services/tenantContext.js';
+
+// The one organization every existing user/asset/finding/etc. belongs to
+// until a second real tenant is onboarded — this is what makes turning on
+// mandatory tenant scoping a non-event for Scratch Solid Solutions' own
+// current usage. See the Phase 1 backfill below.
+const DEFAULT_ORGANIZATION_SLUG = 'scratch-solid-solutions';
+const DEFAULT_ORGANIZATION_NAME = 'Scratch Solid Solutions';
 
 // Resolve dialect from DATABASE_URL so PostgreSQL/MySQL work
 // without any code changes — just swap the connection string.
@@ -25,6 +35,7 @@ export const sequelize = new Sequelize(CONFIG.DATABASE_URL, {
 export const initModels = async () => {
   // Test database connection
   await sequelize.authenticate();
+  const organizationModel = (await import('./organization.js')).default(sequelize);
   // Dynamically import and initialize User model
   const userModel = (await import('./user.js')).default(sequelize);
   // Dynamically import and initialize Ticket model
@@ -47,6 +58,7 @@ export const initModels = async () => {
   const notificationLedgerModel = (await import('./notificationLedger.js')).default(sequelize);
   const securityStateModel = (await import('./securityState.js')).default(sequelize);
   const agentCommandModel = (await import('./agentCommand.js')).default(sequelize);
+  const reportSnapshotModel = (await import('./reportSnapshot.js')).default(sequelize);
 
   // Define relationships by SCJ ID instead of numeric PK.
   userModel.hasMany(ticketModel, { foreignKey: 'assigneeId', sourceKey: 'scjId', as: 'assignedTickets', constraints: false });
@@ -66,12 +78,41 @@ export const initModels = async () => {
   applicationAssetModel.hasMany(securityFindingModel, { foreignKey: 'applicationAssetId', as: 'findings' });
   securityFindingModel.belongsTo(applicationAssetModel, { foreignKey: 'applicationAssetId', as: 'application' });
 
+  // Fail-closed tenant scoping (see services/tenantScoping.js): every one of
+  // these models throws on any find/create/update/destroy that isn't
+  // running inside a tenant context, rather than silently running unscoped.
+  // Deliberately NOT applied to: Organization itself (the tenant registry —
+  // scoping it to a tenant would be circular), and RevokedToken (a global
+  // JWT-jti blacklist keyed by a globally-unique token id, not tenant data).
+  const tenantScopedModels = [
+    userModel, ticketModel, ticketHistoryModel, applicationAssetModel, securityFindingModel,
+    connectorDeadLetterModel, ticketResolutionReportModel, auditLogModel, ticketCommentModel,
+    ticketActionItemModel, connectorReceiptModel, networkDeviceModel, databaseAssetModel,
+    patchTaskModel, scanRunRecordModel, notificationLedgerModel, securityStateModel,
+    agentCommandModel, reportSnapshotModel,
+  ];
+  for (const model of tenantScopedModels) applyTenantScoping(model);
+
   // Rebuild schema in tests; create-only in normal runtime.
   await sequelize.sync({ force: process.env.NODE_ENV === 'test' });
 
-  // SecurityState is a singleton row (id=1) backing the Fortress kill-switch
-  // tiers — ensure it always exists so callers never have to null-check it.
-  await securityStateModel.findOrCreate({ where: { id: 1 }, defaults: { id: 1 } });
+  // The one organization every pre-existing row belongs to (see the
+  // module-level comment) — created as a platform-admin operation since
+  // Organization itself has no tenant to scope by. Runs in every
+  // environment, including test, so test suites always have a real org to
+  // work with.
+  const defaultOrganization = await runAsPlatformAdmin(() => organizationModel.findOrCreate({
+    where: { slug: DEFAULT_ORGANIZATION_SLUG },
+    defaults: { name: DEFAULT_ORGANIZATION_NAME, slug: DEFAULT_ORGANIZATION_SLUG },
+  })).then(([org]) => org);
+
+  // SecurityState is one row per organization backing that tenant's own
+  // Fortress kill-switch tiers — ensure the default org's row always exists
+  // so callers never have to null-check it.
+  await runAsPlatformAdmin(() => securityStateModel.findOrCreate({
+    where: { organizationId: defaultOrganization.id },
+    defaults: { organizationId: defaultOrganization.id },
+  }));
 
   if (process.env.NODE_ENV !== 'test') {
     const queryInterface = sequelize.getQueryInterface();
@@ -116,6 +157,19 @@ export const initModels = async () => {
       }
     };
 
+    // Tightening a NOT NULL constraint is the inverse of ensureNullable, and
+    // NOT always safe on its own — every existing row must already satisfy
+    // it first. Backfills any NULLs to defaultValue before tightening, so
+    // this is always safe to call regardless of how much history exists.
+    const ensureNotNullWithBackfill = async (tableName, columnName, defaultValue) => {
+      const schema = await queryInterface.describeTable(tableName);
+      if (!schema[columnName] || !schema[columnName].allowNull) return; // already NOT NULL, or column doesn't exist
+      await sequelize.query(`UPDATE "${tableName}" SET "${columnName}" = ? WHERE "${columnName}" IS NULL`, {
+        replacements: [defaultValue],
+      });
+      await sequelize.query(`ALTER TABLE "${tableName}" ALTER COLUMN "${columnName}" SET NOT NULL`);
+    };
+
     await ensureColumn('Users', 'username', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'surname', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'department', { type: DataTypes.STRING, allowNull: true });
@@ -141,6 +195,7 @@ export const initModels = async () => {
     await ensureColumn('Users', 'mfaSecret', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCode', { type: DataTypes.STRING(16), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCodeExpiresAt', { type: DataTypes.DATE, allowNull: true });
+    await ensureColumn('Users', 'mustChangePassword', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
     await ensureColumn('Tickets', 'lifecycleStage', { type: DataTypes.STRING(64), allowNull: false, defaultValue: 'identified' });
     await ensureColumn('Tickets', 'slaDueAt', { type: DataTypes.DATE, allowNull: true });
     await ensureColumn('Tickets', 'triagedAt', { type: DataTypes.DATE, allowNull: true });
@@ -192,6 +247,65 @@ export const initModels = async () => {
     await ensureColumn('AgentCommands', 'externalRef', { type: DataTypes.STRING(255), allowNull: true });
     await ensureColumn('AgentCommands', 'failureReason', { type: DataTypes.STRING(500), allowNull: true });
     await ensureEnumValue('enum_AgentCommands_status', 'failed');
+    await ensureColumn('AuditLogs', 'prevHash', { type: DataTypes.STRING(64), allowNull: true });
+    await ensureColumn('AuditLogs', 'hash', { type: DataTypes.STRING(64), allowNull: true });
+
+    // One-time backfill: give every pre-existing AuditLog row (created
+    // before hash-chaining existed) a real hash too, so the chain covers
+    // full history rather than only rows created after this deploy. Only
+    // does anything the first time it runs — once every row has a hash,
+    // this query returns nothing on every subsequent boot. Run as a
+    // platform-admin operation (bypasses tenant scoping): every pre-existing
+    // row belongs to the one default organization anyway (multi-tenancy
+    // didn't exist yet when they were created), so one continuous chain
+    // across "all of them" and "the default org's rows" is the same set.
+    await runAsPlatformAdmin(async () => {
+      const unhashedRows = await auditLogModel.findAll({ where: { hash: null }, order: [['id', 'ASC']] });
+      if (unhashedRows.length > 0) {
+        const latestHashed = await auditLogModel.findOne({ where: { hash: { [Sequelize.Op.ne]: null } }, order: [['id', 'DESC']] });
+        let prevHash = latestHashed ? latestHashed.hash : null;
+        for (const row of unhashedRows) {
+          const rowPrevHash = prevHash;
+          row.prevHash = rowPrevHash;
+          row.hash = computeAuditHash(row, rowPrevHash);
+          await row.save({ hooks: false });
+          prevHash = row.hash;
+        }
+      }
+    });
+
+    // Phase 1 multi-tenancy migration: every tenant-scoped table gets an
+    // organizationId column, backfilled to the one default organization
+    // (every row that already existed predates multi-tenancy, so it all
+    // belongs there), then tightened to NOT NULL. Additive and safe to run
+    // repeatedly — each step is a no-op once already applied.
+    const tenantScopedTables = [
+      'Users', 'Tickets', 'TicketHistories', 'ApplicationAssets', 'SecurityFindings',
+      'ConnectorDeadLetters', 'TicketResolutionReports', 'AuditLogs', 'TicketComments',
+      'TicketActionItems', 'ConnectorReceipts', 'NetworkDevices', 'DatabaseAssets',
+      'PatchTasks', 'ScanRunRecords', 'NotificationLedgers', 'SecurityStates', 'AgentCommands',
+    ];
+    for (const tableName of tenantScopedTables) {
+      await ensureColumn(tableName, 'organizationId', { type: DataTypes.INTEGER, allowNull: true });
+      await ensureNotNullWithBackfill(tableName, 'organizationId', defaultOrganization.id);
+    }
+
+    // ApplicationAssets/NetworkDevices/DatabaseAssets previously had a
+    // globally-unique `name` — two different customer organizations may
+    // legitimately both name an asset the same thing, so the old
+    // single-column unique constraint has to go. (A per-organization
+    // composite unique constraint is a reasonable follow-up, not yet added.)
+    for (const [tableName, constraintGuess] of [
+      ['ApplicationAssets', 'ApplicationAssets_name_key'],
+      ['NetworkDevices', 'NetworkDevices_name_key'],
+      ['DatabaseAssets', 'DatabaseAssets_name_key'],
+    ]) {
+      try {
+        await sequelize.query(`ALTER TABLE "${tableName}" DROP CONSTRAINT IF EXISTS "${constraintGuess}"`);
+      } catch {
+        // Non-Postgres dialects (or an already-dropped constraint) — safe to ignore.
+      }
+    }
 
     const ticketSchema = await queryInterface.describeTable('Tickets');
     if (ticketSchema.assigneeId && ticketSchema.assigneeId.type !== 'VARCHAR(14)') {
@@ -219,9 +333,17 @@ export const initModels = async () => {
     await ensureIndex('NotificationLedgers', ['status'], 'idx_notification_ledgers_status');
     await ensureIndex('NotificationLedgers', ['createdAt'], 'idx_notification_ledgers_created_at');
     await ensureIndex('AgentCommands', ['applicationAssetId', 'status'], 'idx_agent_commands_asset_status');
+
+    // Every tenant-scoped query now filters by organizationId — index it on
+    // every one of those tables, not just the ones that already had one.
+    for (const tableName of tenantScopedTables) {
+      await ensureIndex(tableName, ['organizationId'], `idx_${tableName.toLowerCase()}_organization_id`);
+    }
   }
   // Return initialized models
   return {
+    organizationModel,
+    defaultOrganization,
     userModel,
     ticketModel,
     ticketHistoryModel,
@@ -241,5 +363,6 @@ export const initModels = async () => {
     notificationLedgerModel,
     securityStateModel,
     agentCommandModel,
+    reportSnapshotModel,
   };
 };

@@ -3,25 +3,35 @@ import bcrypt from 'bcryptjs';
 import http from 'http';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
+import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
 
 let token;
+let defaultOrgId;
 
 beforeAll(async () => {
   // Wait for DB init and route mounting
   await ready;
 
-  // Seed an admin user directly into DB
+  // Direct model access outside of an HTTP request has no tenant context
+  // established automatically (see services/tenantContext.js) — every
+  // tenant-scoped model query here needs an explicit platform-admin
+  // bypass, same as any real background job would.
   const hash = await bcrypt.hash('password123', 10);
-  await sequelize.models.User.destroy({ where: {}, truncate: true });
-  await sequelize.models.User.create({
-    name: 'admin_test',
-    role: 'admin',
-    password_hash: hash,
-    telegramNumber: '+27123456789',
-    telegramChatId: '100000900',
-    audienceCode: 'TJN',
-    operationalTeams: ['Network'],
-    department: 'Networks',
+  await runAsPlatformAdmin(async () => {
+    const org = await sequelize.models.Organization.findOne({ where: { slug: 'scratch-solid-solutions' } });
+    defaultOrgId = org.id;
+    await sequelize.models.User.destroy({ where: {} });
+    await sequelize.models.User.create({
+      organizationId: org.id,
+      name: 'admin_test',
+      role: 'admin',
+      password_hash: hash,
+      telegramNumber: '+27123456789',
+      telegramChatId: '100000900',
+      audienceCode: 'TJN',
+      operationalTeams: ['Network'],
+      department: 'Networks',
+    });
   });
 
   // Login to get a real token
@@ -468,7 +478,7 @@ describe('Reports, Governance, and Assistant', () => {
   });
 
   it('auto-tends an alert and links it to an incident ticket', async () => {
-    const finding = await sequelize.models.SecurityFinding.create({
+    const finding = await runWithOrganization(defaultOrgId, () => sequelize.models.SecurityFinding.create({
       sourceTool: 'jest-seed',
       detectionMode: 'passive',
       category: 'intrusion',
@@ -477,7 +487,7 @@ describe('Reports, Governance, and Assistant', () => {
       description: 'Validate one-click alert tending workflow',
       fingerprint: `assistant-tend-alert-${Date.now()}`,
       status: 'new',
-    });
+    }));
 
     const tended = await request(app)
       .post('/api/assistant/tend-alert')
@@ -493,7 +503,7 @@ describe('Reports, Governance, and Assistant', () => {
     expect(tended.body.finding).toHaveProperty('status', 'investigating');
     expect(tended.body.linkedTicketId).not.toBeNull();
 
-    const refreshed = await sequelize.models.SecurityFinding.findByPk(finding.id);
+    const refreshed = await runWithOrganization(defaultOrgId, () => sequelize.models.SecurityFinding.findByPk(finding.id));
     expect(refreshed.ticketId).toBe(tended.body.linkedTicketId);
   });
 });
@@ -745,10 +755,10 @@ describe('Asset Enforcement Onboarding', () => {
   });
 
   beforeAll(async () => {
-    const asset = await sequelize.models.ApplicationAsset.create({
+    const asset = await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.create({
       name: 'enforcement-test-asset',
       baseUrl: 'http://placeholder.invalid',
-    });
+    }));
     assetId = asset.id;
   });
 
@@ -770,13 +780,13 @@ describe('Asset Enforcement Onboarding', () => {
       .set('x-agent-key', issued.body.agentKey);
     expect(accepted.status).toBe(200);
 
-    const asset = await sequelize.models.ApplicationAsset.findByPk(assetId);
+    const asset = await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.findByPk(assetId));
     expect(asset.enforcementModel).toBe('agent');
     expect(asset.enforcementMode).toBe('shadow');
     expect(asset.lastHeartbeatAt).not.toBeNull();
 
     // Point the asset at a real reachable server for the verify step below.
-    await asset.update({ baseUrl: testServerUrl });
+    await runWithOrganization(defaultOrgId, () => asset.update({ baseUrl: testServerUrl }));
   });
 
   it('blocks promotion to active mode until verification succeeds, then allows it', async () => {
@@ -876,10 +886,10 @@ describe('Edge Enforcement (Cloudflare)', () => {
   });
 
   beforeAll(async () => {
-    const asset = await sequelize.models.ApplicationAsset.create({
+    const asset = await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.create({
       name: 'edge-enforcement-test-asset',
       baseUrl: 'http://placeholder.invalid',
-    });
+    }));
     assetId = asset.id;
   });
 
@@ -896,7 +906,7 @@ describe('Edge Enforcement (Cloudflare)', () => {
     expect(verify.status).toBe(200);
     expect(verify.body.status).toBe('failed');
 
-    const asset = await sequelize.models.ApplicationAsset.findByPk(assetId);
+    const asset = await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.findByPk(assetId));
     expect(asset.verificationStatus).toBe('failed');
   });
 

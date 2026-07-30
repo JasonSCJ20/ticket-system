@@ -17,8 +17,18 @@ export default ({ models, authMiddleware }) => {
     return res.status(403).json({ error: 'Insufficient permissions' });
   };
 
+  // findOrCreate, not findByPk(1) — SecurityState is now one row per
+  // organization, self-healing here rather than depending on some other
+  // provisioning step to have created it when the organization itself was
+  // created (nothing does that yet — there's no real org-onboarding route
+  // in this phase). Tenant scoping (see services/tenantScoping.js)
+  // transparently adds the organizationId filter/stamp as long as this
+  // runs inside the request's tenant context (established by
+  // authMiddleware), so an empty where/defaults here still resolves to
+  // exactly the caller's own organization's row.
   async function getState() {
-    return SecurityState.findByPk(1);
+    const [state] = await SecurityState.findOrCreate({ where: {}, defaults: {} });
+    return state;
   }
 
   router.get('/status', authMiddleware, adminOnly, async (_req, res) => {
@@ -48,7 +58,7 @@ export default ({ models, authMiddleware }) => {
         globalRevokeReason: req.body.reason || null,
         globalRevokeBy: req.user?.username || 'unknown',
       });
-      await refreshSecurityStateCache();
+      await refreshSecurityStateCache(req.user.organizationId);
 
       await AuditLog.create({
         entityType: 'security_state',
@@ -79,7 +89,7 @@ export default ({ models, authMiddleware }) => {
       const state = await getState();
       const blockedIps = Array.from(new Set([...(state.blockedIps || []), req.body.ip]));
       await state.update({ blockedIps });
-      await refreshSecurityStateCache();
+      await refreshSecurityStateCache(req.user.organizationId);
 
       await AuditLog.create({
         entityType: 'security_state',
@@ -107,7 +117,7 @@ export default ({ models, authMiddleware }) => {
       const state = await getState();
       const blockedIps = (state.blockedIps || []).filter((ip) => ip !== req.body.ip);
       await state.update({ blockedIps });
-      await refreshSecurityStateCache();
+      await refreshSecurityStateCache(req.user.organizationId);
 
       await AuditLog.create({
         entityType: 'security_state',
@@ -140,7 +150,7 @@ export default ({ models, authMiddleware }) => {
         lockdownAt: req.body.active ? new Date() : null,
         lockdownBy: req.user?.username || 'unknown',
       });
-      await refreshSecurityStateCache();
+      await refreshSecurityStateCache(req.user.organizationId);
 
       await AuditLog.create({
         entityType: 'security_state',
@@ -179,8 +189,8 @@ function fullPath(req) {
   return req.originalUrl.split('?')[0];
 }
 
-export function checkRequestAgainstSecurityState(req, res) {
-  const state = getSecurityStateCache();
+export function checkRequestAgainstSecurityState(req, res, organizationId) {
+  const state = getSecurityStateCache(organizationId);
   // The kill-switch management path itself is always exempt from both the IP
   // block and the lockdown, for the same reason: an admin must always be
   // able to reach the controls that undo a block or a lockdown, even one

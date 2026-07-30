@@ -19,6 +19,7 @@ const { default: backendApp, ready: backendReady } = await import(
   '../../node-backend/src/app.js'
 );
 const { sequelize } = await import('../../node-backend/src/models/index.js');
+const { runAsPlatformAdmin, runWithOrganization } = await import('../../node-backend/src/services/tenantContext.js');
 const { shield } = await import('../src/index.js');
 
 let backendServer;
@@ -29,6 +30,7 @@ let assetId;
 let hostServer;
 let hostBaseUrl;
 let agentKey;
+let defaultOrgId;
 
 async function login() {
   const res = await fetch(`${apiBaseUrl}/token`, {
@@ -53,22 +55,27 @@ beforeAll(async () => {
   // Admin Account" upsert) — work with that single row instead of creating
   // a second one with the same name, which would otherwise collide in the
   // login lookup and silently resolve to whichever row comes first.
-  const admin = await sequelize.models.User.findOne({ where: { name: process.env.ADMIN_USERNAME } });
-  await admin.update({
-    telegramNumber: '+27123456780',
-    telegramChatId: '100000901',
-    audienceCode: 'TJN',
-    operationalTeams: ['Network'],
-    department: 'Networks',
+  // Direct model access outside an HTTP request has no tenant context
+  // established automatically — see node-backend's tenantContext.js.
+  defaultOrgId = await runAsPlatformAdmin(async () => {
+    const admin = await sequelize.models.User.findOne({ where: { name: process.env.ADMIN_USERNAME } });
+    await admin.update({
+      telegramNumber: '+27123456780',
+      telegramChatId: '100000901',
+      audienceCode: 'TJN',
+      operationalTeams: ['Network'],
+      department: 'Networks',
+    });
+    return admin.organizationId;
   });
 
   adminToken = await login();
   expect(adminToken).toBeTruthy();
 
-  const created = await sequelize.models.ApplicationAsset.create({
+  const created = await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.create({
     name: 'agent-integration-target',
     baseUrl: 'placeholder',
-  });
+  }));
   assetId = created.id;
 
   const keyRes = await fetch(`${apiBaseUrl}/security/applications/${assetId}/agent-key`, {
@@ -107,7 +114,7 @@ describe('shield() against a real CommandCentre backend', () => {
 
     // Point the registered asset's baseUrl at the real host app so the
     // backend's canary probe can actually reach it.
-    await sequelize.models.ApplicationAsset.update({ baseUrl: hostBaseUrl }, { where: { id: assetId } });
+    await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.update({ baseUrl: hostBaseUrl }, { where: { id: assetId } }));
 
     // Let the heartbeat loop fire at least once for real.
     await new Promise((resolve) => setTimeout(resolve, 700));

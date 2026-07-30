@@ -18,6 +18,7 @@ const { default: backendApp, ready: backendReady } = await import(
   '../../node-backend/src/app.js'
 );
 const { sequelize } = await import('../../node-backend/src/models/index.js');
+const { runAsPlatformAdmin } = await import('../../node-backend/src/services/tenantContext.js');
 const { sentinel } = await import('../src/index.js');
 
 let backendServer;
@@ -58,13 +59,17 @@ beforeAll(async () => {
   backendBaseUrl = `http://127.0.0.1:${port}`;
   apiBaseUrl = `${backendBaseUrl}/api`;
 
-  const admin = await sequelize.models.User.findOne({ where: { name: process.env.ADMIN_USERNAME } });
-  await admin.update({
-    telegramNumber: '+27123456781',
-    telegramChatId: '100000902',
-    audienceCode: 'TJN',
-    operationalTeams: ['Network'],
-    department: 'Networks',
+  // Direct model access outside an HTTP request has no tenant context
+  // established automatically — see node-backend's tenantContext.js.
+  await runAsPlatformAdmin(async () => {
+    const admin = await sequelize.models.User.findOne({ where: { name: process.env.ADMIN_USERNAME } });
+    await admin.update({
+      telegramNumber: '+27123456781',
+      telegramChatId: '100000902',
+      audienceCode: 'TJN',
+      operationalTeams: ['Network'],
+      department: 'Networks',
+    });
   });
   adminToken = await login();
 

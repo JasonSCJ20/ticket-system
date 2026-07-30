@@ -4,6 +4,7 @@
  */
 
 import { HTTP_STATUS, ERROR_MESSAGES } from './constants.js';
+import { logger } from './logger.js';
 
 // ============================================================================
 // RESPONSE HELPERS
@@ -116,7 +117,7 @@ export const executeDbOperation = async (operation, friendlyName = 'Database ope
   try {
     return await operation();
   } catch (err) {
-    console.error(`${friendlyName} failed:`, err.message);
+    logger.error({ err }, `${friendlyName} failed`);
     return null;
   }
 };
@@ -194,36 +195,6 @@ export const validatePassword = (password) => {
     return { isValid: false, message: 'Password must contain special characters' };
   }
   return { isValid: true, message: 'Password is valid' };
-};
-
-// ============================================================================
-// LOGGING HELPERS
-// ============================================================================
-
-/**
- * Format and log API request info
- * @param {Request} req - Express request object
- * @param {string} action - Action being performed
- */
-export const logApiCall = (req, action) => {
-  const user = req.user?.username || 'anonymous';
-  const path = req.path;
-  const method = req.method;
-  console.log(`[${method}] ${path} - ${action} - User: ${user}`);
-};
-
-/**
- * Log error with context
- * @param {Error} err - Error object
- * @param {string} context - Context description
- * @param {object} additional - Additional info to log
- */
-export const logError = (err, context, additional = {}) => {
-  console.error(`ERROR [${context}]:`, {
-    message: err.message,
-    stack: err.stack,
-    ...additional,
-  });
 };
 
 // ============================================================================
@@ -346,8 +317,6 @@ export default {
   isValidEmail,
   isValidScjId,
   validatePassword,
-  logApiCall,
-  logError,
   deepClone,
   omitKeys,
   pickKeys,

@@ -3,6 +3,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('PatchTask', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     assetType: {
       type: DataTypes.ENUM('application', 'network_device', 'database_asset'),
       allowNull: false,

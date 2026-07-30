@@ -7,111 +7,91 @@ import {
 } from './findingIntelligence.js';
 import { recordScanRun } from './scanRunLedger.js';
 import { getRegistryToolsForAsset } from './toolRegistry.js';
+import { createGitleaksScanner } from './scanners/gitleaks.js';
+import { createTrivyScanner } from './scanners/trivy.js';
+import { createSemgrepScanner } from './scanners/semgrep.js';
+import { createNucleiScanner } from './scanners/nuclei.js';
+import { pushFindingEvent } from './socLiveFeed.js';
 
-const PASSIVE_PATTERNS = [
-  {
-    sourceTool: 'Suricata',
-    category: 'intrusion',
-    severity: 'high',
-    title: 'Suspicious inbound signature detected',
-    description: 'IDS signature matched suspicious payload from untrusted source.',
-  },
-  {
-    sourceTool: 'Prometheus',
-    category: 'availability',
-    severity: 'medium',
-    title: 'Health endpoint latency spike',
-    description: 'Application health-check latency exceeded baseline threshold.',
-  },
-  {
-    sourceTool: 'Wazuh',
-    category: 'vulnerability',
-    severity: 'critical',
-    title: 'Known exploitable package detected',
-    description: 'Vulnerability scan detected package with known remote code execution risk.',
-  },
-  {
-    sourceTool: 'Falco',
-    category: 'runtime',
-    severity: 'high',
-    title: 'Unexpected privileged container execution',
-    description: 'Runtime detection observed abnormal privileged process behavior.',
-  },
-  {
-    sourceTool: 'Zeek',
-    category: 'network',
-    severity: 'medium',
-    title: 'Anomalous protocol behavior detected',
-    description: 'Behavioral network analytics flagged uncommon protocol sequencing.',
-  },
-];
+// Real self-scan target: the platform's own source tree. Configurable
+// because production runs from a vendored deploy path, not necessarily this
+// repo's own checkout.
+const SELF_SCAN_ROOT_PATH = process.env.SELF_SCAN_ROOT_PATH || process.cwd();
+const COMMAND_CENTRE_PLATFORM_APP_NAME = 'CommandCentre Platform';
 
-const ACTIVE_PATTERNS = [
-  {
-    sourceTool: 'Nuclei',
-    category: 'vulnerability',
-    severity: 'high',
-    title: 'Potential exposed admin endpoint',
-    description: 'Active scan found publicly reachable management endpoint.',
-  },
-  {
-    sourceTool: 'OWASP ZAP',
-    category: 'application',
-    severity: 'medium',
-    title: 'Reflected input without strict sanitization',
-    description: 'Active probe indicates a potential reflected injection vector.',
-  },
-  {
-    sourceTool: 'Zeek',
-    category: 'network',
-    severity: 'low',
-    title: 'Unusual outbound DNS activity',
-    description: 'Network telemetry detected atypical DNS query pattern.',
-  },
-  {
-    sourceTool: 'Semgrep',
-    category: 'application',
-    severity: 'medium',
-    title: 'Insecure code pattern identified',
-    description: 'Static analysis discovered a code path vulnerable to injection abuse.',
-  },
-  {
-    sourceTool: 'Trivy',
-    category: 'vulnerability',
-    severity: 'high',
-    title: 'Critical dependency CVE exposure detected',
-    description: 'Dependency and container scan found exploitable CVE in shipped artifact.',
-  },
-  {
-    sourceTool: 'Gitleaks',
-    category: 'secrets',
-    severity: 'critical',
-    title: 'Exposed credential material found',
-    description: 'Secret scanning detected a leaked token or credential in code history.',
-  },
-  {
-    sourceTool: 'OpenVAS',
-    category: 'vulnerability',
-    severity: 'high',
-    title: 'Externally reachable service vulnerability',
-    description: 'Infrastructure scanner reported remotely exploitable network service weakness.',
-  },
-];
+export const DEFAULT_SCANNERS = {
+  gitleaks: createGitleaksScanner(),
+  trivy: createTrivyScanner(),
+  semgrep: createSemgrepScanner(),
+  nuclei: createNucleiScanner(),
+};
 
-function randomPattern(mode) {
-  const pool = mode === 'active' ? ACTIVE_PATTERNS : PASSIVE_PATTERNS;
-  return pool[Math.floor(Math.random() * pool.length)];
-}
+// Categories carried over unchanged from the old canned-pattern list so
+// existing dashboard category filters/groupings don't shift under real data.
+const TOOL_CATEGORY = {
+  Gitleaks: 'secrets',
+  Trivy: 'vulnerability',
+  Semgrep: 'application',
+  Nuclei: 'vulnerability',
+};
 
-function patternForTool(mode, toolName) {
-  const pool = mode === 'active' ? ACTIVE_PATTERNS : PASSIVE_PATTERNS;
-  const exact = pool.find((item) => item.sourceTool === toolName);
-  return exact || randomPattern(mode);
-}
+// Tools this platform can genuinely run itself today. Everything else in
+// the registry (OWASP ZAP, Dependency-Track, and every passive-domain tool:
+// Suricata/Zeek/Wazuh/Falco/Prometheus) has no real execution path yet —
+// runSecuritySweep records those as "skipped" with an honest reason rather
+// than fabricating a finding for them. Real integrations (Wazuh/Suricata/
+// Prometheus) still work fully via their own inbound connectors in
+// securityConnectors.js; this list is only about what THIS sweep can run.
+const SELF_SCAN_HANDLERS = {
+  async Gitleaks(scanners, sourcePath) {
+    const leaks = await scanners.gitleaks.scan(sourcePath);
+    return leaks.map((leak) => ({
+      externalEventId: leak.fingerprint,
+      severity: 'critical',
+      title: `Leaked credential detected: ${leak.ruleId} in ${leak.file}`,
+      description: `Gitleaks matched rule "${leak.ruleId}" at ${leak.file}:${leak.line}. Rotate this credential immediately if it is real — the matched secret value itself is never included in this finding.`,
+      evidence: JSON.stringify(leak),
+    }));
+  },
+  async Trivy(scanners, sourcePath) {
+    const vulns = await scanners.trivy.scan(sourcePath);
+    return vulns.map((vuln) => ({
+      externalEventId: `${vuln.package}@${vuln.installedVersion}:${vuln.cveId}`,
+      severity: vuln.severity,
+      title: `${vuln.cveId}: ${vuln.title}`,
+      description: `${vuln.package}@${vuln.installedVersion} in ${vuln.target} is affected by ${vuln.cveId}.${vuln.fixedVersion ? ` Fixed in ${vuln.fixedVersion}.` : ' No fix currently available.'}`,
+      evidence: JSON.stringify(vuln),
+      cveId: vuln.cveId,
+    }));
+  },
+  async Semgrep(scanners, sourcePath) {
+    const hits = await scanners.semgrep.scan(sourcePath);
+    return hits.map((hit) => ({
+      externalEventId: `${hit.ruleId}:${hit.file}:${hit.line}`,
+      severity: hit.severity,
+      title: `${hit.ruleId} in ${hit.file}`,
+      description: `${hit.message} (${hit.file}:${hit.line})`,
+      evidence: JSON.stringify(hit),
+      cweId: hit.cweId,
+    }));
+  },
+};
 
-function shouldGenerateFinding(mode) {
-  const chance = mode === 'active' ? 0.75 : 0.55;
-  return Math.random() < chance;
+// enabled: false is deliberate — this is a bookkeeping row for self-scan
+// findings, not a monitored customer asset. It must stay excluded from the
+// `enabled: true` application list runSecuritySweep iterates below, or it
+// would also receive a pointless Nuclei scan against its placeholder URL.
+async function resolveCommandCentrePlatformAsset(ApplicationAsset) {
+  const [app] = await ApplicationAsset.findOrCreate({
+    where: { name: COMMAND_CENTRE_PLATFORM_APP_NAME },
+    defaults: {
+      baseUrl: 'https://internal.commandcentre.local',
+      environment: 'production',
+      enabled: false,
+      healthStatus: 'unknown',
+    },
+  });
+  return app;
 }
 
 function healthFromFindings(findingSeverities) {
@@ -289,102 +269,228 @@ export async function ingestFinding({
     await autoCreateTicketForFinding({ finding, app, models, notifyTicket });
   }
 
+  // Real live-feed activity, not fabricated — see socLiveFeed.js.
+  pushFindingEvent(finding);
+
   return { finding, created: true };
 }
 
-export async function runSecuritySweep({ mode, actor = 'system', models, notifyTicket }) {
+async function recordSkippedToolRun({ ScanRunRecord, AuditLog, tool, mode, actor, assetType, assetId, assetName, assetRef, reason }) {
+  await recordScanRun({
+    ScanRunRecord,
+    AuditLog,
+    toolId: tool.id,
+    toolName: tool.name,
+    engine: tool.engine,
+    mode,
+    status: 'skipped',
+    triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+    actor,
+    actorRole: actor === 'scheduler' ? 'system' : null,
+    assetType,
+    assetId,
+    assetName,
+    assetRef,
+    findings: [],
+    newFindingsCount: 0,
+    detail: reason,
+    startedAt: new Date(),
+    completedAt: new Date(),
+    metadata: { capability: tool.capability, domain: tool.domain },
+  });
+}
+
+// Runs the self-scan tools (Gitleaks/Trivy/Semgrep) ONCE per sweep, against
+// the platform's own source tree — these aren't scoped to any one
+// registered ApplicationAsset, so they don't belong in the per-app loop
+// below. Findings land against a dedicated "CommandCentre Platform"
+// pseudo-asset, consistent with the tool registry's existing
+// `protectsCommandCentre` flag on every entry.
+async function runSelfScans({ models, notifyTicket, actor, scanners, tools }) {
+  const { ApplicationAsset, ScanRunRecord, AuditLog } = models;
+  const platformApp = await resolveCommandCentrePlatformAsset(ApplicationAsset);
+  const createdFindings = [];
+
+  for (const tool of tools) {
+    const handler = SELF_SCAN_HANDLERS[tool.name];
+    const startedAt = new Date();
+    if (!handler) {
+      await recordSkippedToolRun({
+        ScanRunRecord, AuditLog, tool, mode: 'active', actor,
+        assetType: 'command_centre', assetId: platformApp.id, assetName: platformApp.name, assetRef: SELF_SCAN_ROOT_PATH,
+        reason: `${tool.name} has no real execution path yet on this platform — no synthetic finding generated.`,
+      });
+      continue;
+    }
+
+    try {
+      const rawFindings = await handler(scanners, SELF_SCAN_ROOT_PATH);
+      const toolFindings = [];
+      for (const raw of rawFindings) {
+        const { finding, created } = await ingestFinding({
+          models,
+          notifyTicket,
+          sourceTool: tool.name,
+          detectionMode: 'active',
+          category: TOOL_CATEGORY[tool.name] || 'application',
+          severity: raw.severity,
+          title: raw.title,
+          description: raw.description,
+          evidence: raw.evidence,
+          externalEventId: raw.externalEventId,
+          cveId: raw.cveId,
+          cweId: raw.cweId,
+          appName: platformApp.name,
+          appUrl: platformApp.baseUrl,
+          affectedAssetType: 'command_centre',
+          affectedAssetRef: SELF_SCAN_ROOT_PATH,
+        });
+        if (created) {
+          toolFindings.push(finding);
+          createdFindings.push(finding);
+        }
+      }
+
+      await recordScanRun({
+        ScanRunRecord, AuditLog,
+        toolId: tool.id, toolName: tool.name, engine: tool.engine, mode: 'active',
+        status: 'completed',
+        triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+        actor, actorRole: actor === 'scheduler' ? 'system' : null,
+        assetType: 'command_centre', assetId: platformApp.id, assetName: platformApp.name, assetRef: SELF_SCAN_ROOT_PATH,
+        findings: toolFindings, newFindingsCount: toolFindings.length,
+        detail: toolFindings.length
+          ? `${tool.name} found ${toolFindings.length} real issue(s) scanning the platform's own source tree.`
+          : `${tool.name} completed a real scan of the platform's own source tree with no findings.`,
+        startedAt, completedAt: new Date(),
+        metadata: { capability: tool.capability, domain: tool.domain },
+      });
+    } catch (err) {
+      await recordScanRun({
+        ScanRunRecord, AuditLog,
+        toolId: tool.id, toolName: tool.name, engine: tool.engine, mode: 'active',
+        status: 'failed',
+        triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+        actor, actorRole: actor === 'scheduler' ? 'system' : null,
+        assetType: 'command_centre', assetId: platformApp.id, assetName: platformApp.name, assetRef: SELF_SCAN_ROOT_PATH,
+        findings: [], newFindingsCount: 0,
+        detail: `${tool.name} failed while scanning the platform's own source tree: ${String(err?.message || err || 'Unknown error')}`,
+        startedAt, completedAt: new Date(),
+        metadata: { capability: tool.capability, domain: tool.domain },
+      });
+    }
+  }
+
+  return createdFindings;
+}
+
+export async function runSecuritySweep({ mode, actor = 'system', models, notifyTicket, scanners = DEFAULT_SCANNERS }) {
   const { ApplicationAsset, ScanRunRecord, AuditLog } = models;
   const applications = await ApplicationAsset.findAll({ where: { enabled: true } });
   const applicationTools = getRegistryToolsForAsset('application', { mode });
 
   const createdFindings = [];
 
+  // Passive-domain tools (Suricata/Zeek/Wazuh/Falco/Prometheus) have no
+  // real execution path here at all — their real signal comes entirely
+  // from their own inbound connectors in securityConnectors.js, which are
+  // unaffected by this. This sweep no longer fabricates passive findings.
+  if (mode === 'passive') {
+    for (const app of applications) {
+      for (const tool of applicationTools) {
+        await recordSkippedToolRun({
+          ScanRunRecord, AuditLog, tool, mode, actor,
+          assetType: 'application', assetId: app.id, assetName: app.name, assetRef: app.baseUrl,
+          reason: `${tool.name} is a passive-domain tool — real signal only arrives via its own inbound connector, never generated by this sweep.`,
+        });
+      }
+    }
+    return createdFindings;
+  }
+
+  // Active mode: self-scan tools run once (see runSelfScans), then each
+  // application asset with a live URL gets a real Nuclei scan. Any other
+  // active-domain tool without a real handler (OWASP ZAP, Dependency-Track)
+  // is recorded as skipped rather than faked.
+  const selfScanTools = applicationTools.filter((t) => t.name in SELF_SCAN_HANDLERS);
+  createdFindings.push(...await runSelfScans({ models, notifyTicket, actor, scanners, tools: selfScanTools }));
+
+  const nucleiTool = applicationTools.find((t) => t.name === 'Nuclei');
+  const otherTools = applicationTools.filter((t) => !(t.name in SELF_SCAN_HANDLERS) && t.name !== 'Nuclei');
+
   for (const app of applications) {
     const scanStartedAt = new Date();
 
-    for (const tool of applicationTools) {
+    if (nucleiTool) {
       const startedAt = new Date();
-      try {
-        const shouldDetect = shouldGenerateFinding(mode);
-        const pattern = patternForTool(mode, tool.name);
-        let detectedFinding = null;
-        let newFindingsCount = 0;
+      if (!app.baseUrl) {
+        await recordSkippedToolRun({
+          ScanRunRecord, AuditLog, tool: nucleiTool, mode, actor,
+          assetType: 'application', assetId: app.id, assetName: app.name, assetRef: app.baseUrl,
+          reason: `${app.name} has no live URL to scan (IP-only asset) — Nuclei needs an HTTP(S) target.`,
+        });
+      } else {
+        try {
+          const hits = await scanners.nuclei.scan(app.baseUrl);
+          const toolFindings = [];
+          for (const hit of hits) {
+            const { finding, created } = await ingestFinding({
+              models,
+              notifyTicket,
+              sourceTool: 'Nuclei',
+              detectionMode: 'active',
+              category: TOOL_CATEGORY.Nuclei,
+              severity: hit.severity,
+              title: `${app.name}: ${hit.name || hit.templateId}`,
+              description: hit.description || `Active scan template ${hit.templateId} matched at ${hit.matchedAt}.`,
+              evidence: JSON.stringify(hit),
+              externalEventId: `${app.id}:${hit.templateId}:${hit.matchedAt}`,
+              appName: app.name,
+              appUrl: app.baseUrl,
+            });
+            if (created) {
+              toolFindings.push(finding);
+              createdFindings.push(finding);
+            }
+          }
 
-        if (shouldDetect && pattern) {
-          const { finding, created } = await ingestFinding({
-            models,
-            notifyTicket,
-            sourceTool: tool.name,
-            detectionMode: mode,
-            category: pattern.category,
-            severity: pattern.severity,
-            title: `${app.name}: ${pattern.title}`,
-            description: `${pattern.description} (Target: ${app.baseUrl})`,
-            evidence: `tool=${tool.name}; mode=${mode}; app=${app.name}`,
-            appName: app.name,
-            appUrl: app.baseUrl,
+          await recordScanRun({
+            ScanRunRecord, AuditLog,
+            toolId: nucleiTool.id, toolName: 'Nuclei', engine: nucleiTool.engine, mode,
+            status: 'completed',
+            triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+            actor, actorRole: actor === 'scheduler' ? 'system' : null,
+            assetType: 'application', assetId: app.id, assetName: app.name, assetRef: app.baseUrl,
+            findings: toolFindings, newFindingsCount: toolFindings.length,
+            detail: toolFindings.length
+              ? `Nuclei found ${toolFindings.length} real issue(s) on ${app.name}.`
+              : `Nuclei completed a real active scan of ${app.name} with no findings.`,
+            startedAt, completedAt: new Date(),
+            metadata: { capability: nucleiTool.capability, domain: nucleiTool.domain, environment: app.environment },
           });
-          detectedFinding = finding;
-          newFindingsCount = created ? 1 : 0;
-          if (created) createdFindings.push(finding);
+        } catch (err) {
+          await recordScanRun({
+            ScanRunRecord, AuditLog,
+            toolId: nucleiTool.id, toolName: 'Nuclei', engine: nucleiTool.engine, mode,
+            status: 'failed',
+            triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
+            actor, actorRole: actor === 'scheduler' ? 'system' : null,
+            assetType: 'application', assetId: app.id, assetName: app.name, assetRef: app.baseUrl,
+            findings: [], newFindingsCount: 0,
+            detail: `Nuclei failed while scanning ${app.name}: ${String(err?.message || err || 'Unknown error')}`,
+            startedAt, completedAt: new Date(),
+            metadata: { capability: nucleiTool.capability, domain: nucleiTool.domain, environment: app.environment },
+          });
         }
-
-        await recordScanRun({
-          ScanRunRecord,
-          AuditLog,
-          toolId: tool.id,
-          toolName: tool.name,
-          engine: tool.engine,
-          mode,
-          status: 'completed',
-          triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
-          actor,
-          actorRole: actor === 'scheduler' ? 'system' : null,
-          assetType: 'application',
-          assetId: app.id,
-          assetName: app.name,
-          assetRef: app.baseUrl,
-          findings: detectedFinding ? [detectedFinding] : [],
-          newFindingsCount,
-          detail: detectedFinding
-            ? `${tool.name} detected a security signal on ${app.name}.`
-            : `${tool.name} completed ${mode} scanning on ${app.name} with no actionable detections.`,
-          startedAt,
-          completedAt: new Date(),
-          metadata: {
-            capability: tool.capability,
-            domain: tool.domain,
-            environment: app.environment,
-          },
-        });
-      } catch (err) {
-        await recordScanRun({
-          ScanRunRecord,
-          AuditLog,
-          toolId: tool.id,
-          toolName: tool.name,
-          engine: tool.engine,
-          mode,
-          status: 'failed',
-          triggerSource: actor === 'scheduler' ? 'scheduler' : 'manual',
-          actor,
-          actorRole: actor === 'scheduler' ? 'system' : null,
-          assetType: 'application',
-          assetId: app.id,
-          assetName: app.name,
-          assetRef: app.baseUrl,
-          findings: [],
-          newFindingsCount: 0,
-          detail: `${tool.name} failed while scanning ${app.name}: ${String(err?.message || err || 'Unknown error')}`,
-          startedAt,
-          completedAt: new Date(),
-          metadata: {
-            capability: tool.capability,
-            domain: tool.domain,
-            environment: app.environment,
-          },
-        });
       }
+    }
+
+    for (const tool of otherTools) {
+      await recordSkippedToolRun({
+        ScanRunRecord, AuditLog, tool, mode, actor,
+        assetType: 'application', assetId: app.id, assetName: app.name, assetRef: app.baseUrl,
+        reason: `${tool.name} has no real execution path yet on this platform — no synthetic finding generated.`,
+      });
     }
 
     await app.update(mode === 'active'

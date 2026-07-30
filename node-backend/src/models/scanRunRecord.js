@@ -3,6 +3,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('ScanRunRecord', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     toolId: { type: DataTypes.STRING(64), allowNull: false },
     toolName: { type: DataTypes.STRING(128), allowNull: false },
     engine: { type: DataTypes.STRING(128), allowNull: false },

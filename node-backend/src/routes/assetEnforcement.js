@@ -4,6 +4,7 @@ import { param, body, validationResult } from 'express-validator';
 import { generateAgentKey, hashAgentKey, verifyAgentKey, encryptAssetCredential, decryptAssetCredential } from '../services/assetSecrets.js';
 import { ingestFinding } from '../services/securityEngine.js';
 import { verifyEdgeCredential, pushIpBlockRule, removeIpBlockRule } from '../services/edgeEnforcement.js';
+import { runAsPlatformAdmin, runWithOrganization } from '../services/tenantContext.js';
 
 const router = express.Router();
 
@@ -37,12 +38,16 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     if (!Number.isInteger(assetId) || !presentedKey) {
       return res.status(401).json({ error: 'Missing agent credentials' });
     }
-    const asset = await ApplicationAsset.findByPk(assetId);
+    // Not a JWT — this daemon authenticates with its own per-asset key, so
+    // there's no organization known yet. Looking the asset up is
+    // inherently a cross-tenant operation until the key itself proves
+    // which asset (and therefore which organization) it belongs to.
+    const asset = await runAsPlatformAdmin(() => ApplicationAsset.findByPk(assetId));
     if (!asset || !asset.agentKeyHash || !verifyAgentKey(presentedKey, asset.agentKeyHash)) {
       return res.status(401).json({ error: 'Invalid agent key' });
     }
     req.asset = asset;
-    next();
+    runWithOrganization(asset.organizationId, next);
   }
 
   // Same shape as agentAuth, but for the host-level sentinel's own key —
@@ -55,12 +60,12 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     if (!Number.isInteger(assetId) || !presentedKey) {
       return res.status(401).json({ error: 'Missing sentinel credentials' });
     }
-    const asset = await ApplicationAsset.findByPk(assetId);
+    const asset = await runAsPlatformAdmin(() => ApplicationAsset.findByPk(assetId));
     if (!asset || !asset.sentinelKeyHash || !verifyAgentKey(presentedKey, asset.sentinelKeyHash)) {
       return res.status(401).json({ error: 'Invalid sentinel key' });
     }
     req.asset = asset;
-    next();
+    runWithOrganization(asset.organizationId, next);
   }
 
   // The command queue (poll/ack) is shared: either the app-layer agent or the
@@ -73,7 +78,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     if (!Number.isInteger(assetId) || !presentedKey) {
       return res.status(401).json({ error: 'Missing credentials' });
     }
-    const asset = await ApplicationAsset.findByPk(assetId);
+    const asset = await runAsPlatformAdmin(() => ApplicationAsset.findByPk(assetId));
     if (!asset) return res.status(401).json({ error: 'Invalid key' });
     const matchesAgent = asset.agentKeyHash && verifyAgentKey(presentedKey, asset.agentKeyHash);
     const matchesSentinel = asset.sentinelKeyHash && verifyAgentKey(presentedKey, asset.sentinelKeyHash);
@@ -81,7 +86,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       return res.status(401).json({ error: 'Invalid key' });
     }
     req.asset = asset;
-    next();
+    runWithOrganization(asset.organizationId, next);
   }
 
   // --- Operator-facing (JWT admin auth) ---

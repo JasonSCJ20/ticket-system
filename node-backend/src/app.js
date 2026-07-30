@@ -38,10 +38,16 @@ import authRouteFactory from './routes/auth.js';
 import reportsRouteFactory from './routes/reports.js';
 import automationRouteFactory from './routes/automation.js';
 import webhooksRouteFactory from './routes/webhooks.js';
+import platformRouteFactory from './routes/platform.js';
 import { runSecuritySweep, healthSummary } from './services/securityEngine.js';
 import { recordScanRun } from './services/scanRunLedger.js';
-import { generateAndPushEvents, pushScanToolEvent } from './services/socLiveFeed.js';
+import { pushScanToolEvent } from './services/socLiveFeed.js';
 import { recordToolSchedulerRun } from './services/toolRegistry.js';
+import { createDeviceProbe } from './services/scanners/deviceProbe.js';
+import { verifyAuditChain } from './services/auditChain.js';
+import { logger, requestLoggingMiddleware } from './logger.js';
+import { createNotificationThrottle } from './services/notificationThrottle.js';
+import { runWithOrganization, runAsPlatformAdmin } from './services/tenantContext.js';
 import { buildAssignment5W1H, buildAssignmentGuidance, buildAssignmentMessage, buildResolutionReport, detectAssignmentDomain } from './services/ticketAssist.js';
 import {
   findingImpactedTeams,
@@ -190,11 +196,32 @@ app.use('/api', (_req, res, next) => {
 });
 
 // Fortress kill-switch enforcement — IP blocks and full lockdown apply
-// before anything else runs (including auth), reading from an in-memory
-// cache refreshed by src/services/securityStateCache.js so this never adds
-// a database round trip to every request.
+// before anything else runs (including the main auth middleware), reading
+// from an in-memory cache refreshed by src/services/securityStateCache.js
+// so this never adds a database round trip to every request. Lockdown
+// state is per-organization (one tenant's incident response must never take
+// down another tenant's access), so this still needs to know which org a
+// request is for — done here via a real (fully verified, not just decoded)
+// JWT check, deliberately duplicating a small amount of the main
+// authMiddleware's verification so org-scoping can apply even at this
+// earliest possible point. An invalid/missing token simply skips this
+// early check (no organization to look up) and falls through to the real
+// authMiddleware, which rejects it properly with 401.
 app.use('/api', (req, res, next) => {
-  if (!checkRequestAgainstSecurityState(req, res)) return;
+  let organizationId = null;
+  const authHeader = req.headers.authorization;
+  const token = authHeader ? authHeader.split(' ')[1] : null;
+  if (token) {
+    try {
+      const payload = jwt.verify(token, CONFIG.SECRET_KEY);
+      organizationId = payload?.organizationId ?? null;
+    } catch {
+      // Invalid/expired token — no organization to check against here;
+      // authMiddleware will reject the request properly further down.
+    }
+  }
+
+  if (!checkRequestAgainstSecurityState(req, res, organizationId)) return;
   next();
 });
 
@@ -213,6 +240,9 @@ app.use('/api', (req, res, next) => {
 });
 // Apply request logging middleware
 app.use(morgan('combined'));
+// Assigns req.log (a structured logger carrying a per-request correlation
+// id) so route handlers can log with real context instead of console.log.
+app.use(requestLoggingMiddleware);
 
 const authApiLimiter = rateLimit({
   windowMs: CONFIG.API_AUTH_RATE_LIMIT_WINDOW_MS,
@@ -291,6 +321,13 @@ async function authMiddleware(req, res, next) {
     if (payload?.jti && await isTokenRevoked(payload.jti)) {
       return res.status(401).json({ error: 'Token has been revoked' });
     }
+    // A token issued before organizationId was added to the JWT payload
+    // (i.e. minted before this deploy) can't be tenant-scoped at all —
+    // reject it cleanly rather than letting every downstream tenant-scoped
+    // query throw. The user just needs to log in again for a fresh token.
+    if (payload?.organizationId == null) {
+      return res.status(401).json({ error: 'Your session is out of date. Please sign in again.' });
+    }
     // Fortress "kill everything now": any token issued before a global
     // revoke instant is rejected, without needing to enumerate individual
     // sessions. Deliberately includes the requester's own token too.
@@ -301,7 +338,7 @@ async function authMiddleware(req, res, next) {
     // token minted in the same second as a revoke may need one extra
     // second before a fresh login is accepted — a reasonable tradeoff
     // against ever accepting a token that should have been killed.
-    const globalRevokeAfter = getSecurityStateCache().globalRevokeAfter;
+    const globalRevokeAfter = getSecurityStateCache(payload.organizationId).globalRevokeAfter;
     if (globalRevokeAfter && payload?.iat) {
       const revokeAfterSeconds = Math.floor(new Date(globalRevokeAfter).getTime() / 1000);
       if (payload.iat <= revokeAfterSeconds) {
@@ -311,8 +348,12 @@ async function authMiddleware(req, res, next) {
     // Attach user info to request
     req.user = payload;
     req.token = token;
-    // Continue to next middleware
-    next();
+    // Establish tenant context for the rest of this request — every
+    // tenant-scoped model query from here on is transparently scoped to
+    // this organization (see services/tenantScoping.js). This is what
+    // makes org-scoping invisible to the ~100+ existing route handlers:
+    // none of them need to know tenant scoping exists at all.
+    runWithOrganization(payload.organizationId, next);
   } catch (err) {
     // Return error for invalid token
     return res.status(401).json({ error: 'Invalid token' });
@@ -369,6 +410,8 @@ async function getGeoForIp(ip) {
 async function setup() {
   // Initialize database models
   const {
+    organizationModel,
+    defaultOrganization,
     userModel,
     ticketModel,
     ticketHistoryModel,
@@ -388,9 +431,28 @@ async function setup() {
     notificationLedgerModel,
     agentCommandModel,
     securityStateModel,
+    reportSnapshotModel,
   } = await initModels();
 
-  initSecurityStateCache(securityStateModel);
+  initSecurityStateCache(securityStateModel, organizationModel);
+
+  // Every scheduled/cron job below runs with no HTTP request behind it, so
+  // none of them have a tenant context established automatically the way a
+  // real request does via authMiddleware. Anything that touches a
+  // tenant-scoped model has to explicitly loop over every organization and
+  // run its work inside that org's own context — this is that loop,
+  // shared so each cron job doesn't have to reimplement it (and risk
+  // getting it wrong) individually.
+  async function forEachOrganization(fn) {
+    const organizations = await runAsPlatformAdmin(() => organizationModel.findAll());
+    for (const org of organizations) {
+      try {
+        await runWithOrganization(org.id, () => fn(org));
+      } catch (err) {
+        logger.error({ err, organizationId: org.id }, 'Scheduled job failed for organization');
+      }
+    }
+  }
 
   isTokenRevoked = async (jti) => {
     if (!jti) return false;
@@ -421,58 +483,63 @@ async function setup() {
 
   // Keep notification ledger bounded to avoid unbounded growth.
   cron.schedule('15 2 * * *', async () => {
-    try {
+    await forEachOrganization(async () => {
       const retentionDays = Number.isFinite(NOTIFICATION_LEDGER_RETENTION_DAYS) && NOTIFICATION_LEDGER_RETENTION_DAYS > 0
         ? NOTIFICATION_LEDGER_RETENTION_DAYS
         : 90;
       const cutoff = new Date(Date.now() - (retentionDays * 24 * 60 * 60 * 1000));
       await notificationLedgerModel.destroy({ where: { createdAt: { [Op.lte]: cutoff } } });
-    } catch (_err) {
-      // best effort cleanup
-    }
+    });
   });
 
   // Initialise persistent auth rate limit table and purge stale entries.
   await initAuthRateLimit();
   pruneExpiredAuthRateLimits().catch(() => {});
 
-  // Enforce a single admin account using configured credentials.
+  // Enforce a single admin account using configured credentials, scoped to
+  // the default organization — this boot-time bootstrap predates
+  // multi-tenancy and only makes sense for the one org that exists so far.
+  // A real per-organization admin-provisioning flow is Phase 2/3, not this.
   const configuredAdminName = CONFIG.ADMIN_USERNAME;
   const passwordHash = bcrypt.hashSync(CONFIG.ADMIN_PASSWORD, 10);
-  const [configuredAdmin] = await userModel.findOrCreate({
-    where: {
-      [Op.or]: [{ username: configuredAdminName }, { name: configuredAdminName }],
-    },
-    defaults: {
+  const configuredAdmin = await runWithOrganization(defaultOrganization.id, async () => {
+    const [admin] = await userModel.findOrCreate({
+      where: {
+        [Op.or]: [{ username: configuredAdminName }, { name: configuredAdminName }],
+      },
+      defaults: {
+        username: configuredAdminName,
+        name: configuredAdminName,
+        surname: null,
+        role: 'admin',
+        // Only set on first creation (never in the unconditional .update()
+        // below) so a fresh admin account isn't immediately stuck behind the
+        // requireCompletedProfile gate, while an admin who later picks their
+        // own audienceCode via Settings keeps it across restarts.
+        audienceCode: 'TJN',
+        password_hash: passwordHash,
+      },
+    });
+
+    await admin.update({
       username: configuredAdminName,
       name: configuredAdminName,
-      surname: null,
       role: 'admin',
-      // Only set on first creation (never in the unconditional .update()
-      // below) so a fresh admin account isn't immediately stuck behind the
-      // requireCompletedProfile gate, while an admin who later picks their
-      // own audienceCode via Settings keeps it across restarts.
-      audienceCode: 'TJN',
       password_hash: passwordHash,
-    },
-  });
+    });
 
-  await configuredAdmin.update({
-    username: configuredAdminName,
-    name: configuredAdminName,
-    role: 'admin',
-    password_hash: passwordHash,
-  });
-
-  await userModel.update(
-    { role: 'analyst' },
-    {
-      where: {
-        role: 'admin',
-        id: { [Op.ne]: configuredAdmin.id },
+    await userModel.update(
+      { role: 'analyst' },
+      {
+        where: {
+          role: 'admin',
+          id: { [Op.ne]: admin.id },
+        },
       },
-    },
-  );
+    );
+
+    return admin;
+  });
 
   // Helper function to find or create user from Telegram data
   function findOrCreateUser(from) {
@@ -590,11 +657,34 @@ async function setup() {
       const shouldNotify = matchesOperationalTeam || audienceCode === 'TJN' || audienceCode === 'GJN' || user.role === 'admin';
       if (!shouldNotify) continue;
 
+      // High-severity alerts are throttled per-recipient so a burst of real
+      // findings (several distinct detections from the same incident, say)
+      // doesn't turn into an immediate alert storm — critical always sends
+      // regardless, see notificationThrottle.js.
+      const admission = notificationThrottle.admit(user.id, finding);
+      if (!admission.send) continue;
+
       const text = audienceCode === 'GJN'
         ? buildLeadershipFindingAlert(finding, impactedTeams, audienceCode)
         : buildTechnicalFindingAlert(finding, impactedTeams);
 
       await sendTelegramToUser(user, text, audienceCode === 'GJN' ? {} : { parse_mode: 'MarkdownV2' });
+    }
+  }
+
+  // Periodically flushes any alerts that were folded into a user's throttle
+  // window instead of sent immediately, as one combined digest message —
+  // so a suppressed alert is delayed, never silently dropped.
+  async function flushNotificationDigests() {
+    const due = notificationThrottle.collectDueDigests();
+    for (const { userId, items } of due) {
+      const user = await userModel.findByPk(userId);
+      if (!user) continue;
+      const lines = items.map((item) => `• [${String(item.severity).toUpperCase()}] ${item.title}`);
+      const text = `${items.length} additional high-severity finding(s) in the last few minutes were bundled to avoid an alert storm:\n${lines.join('\n')}\nSee the Findings page for full detail.`;
+      await sendTelegramToUser(user, text, {}).catch((err) => {
+        logger.error({ err, userId }, 'Notification digest delivery failed');
+      });
     }
   }
 
@@ -613,6 +703,17 @@ async function setup() {
   const requireCompletedProfile = async (req, res, next) => {
     const user = await userModel.findByPk(req.user.sub);
     if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // A platform-admin-issued temporary password (see routes/platform.js)
+    // must be changed before anything else — a known plaintext password
+    // that went out over email/Telegram should never remain valid
+    // indefinitely.
+    if (user.mustChangePassword) {
+      return res.status(428).json({
+        error: 'Password change required',
+        mustChangePassword: true,
+      });
+    }
 
     const profileState = getProfileCompletionState(user);
     if (profileState.isComplete) return next();
@@ -748,7 +849,7 @@ async function setup() {
 
   securityFindingModel.addHook('afterCreate', 'notify-telegram-audience', async (finding) => {
     await notifyFindingAudience(finding).catch((err) => {
-      console.error('High-severity finding notification failed:', err?.message || err);
+      logger.error({ err, findingId: finding.id }, 'High-severity finding notification failed');
     });
   });
 
@@ -777,7 +878,13 @@ async function setup() {
   };
 
   const writePublicAudit = async (req, { entityType, entityId, action, details = null }) => {
+    // Called from pre-auth routes (registration, login, password recovery)
+    // which run under a platform-admin context (see routes/auth.js) — no
+    // organization is known yet at this point, so this attributes to the
+    // default org for now. A real multi-org product would need a way to
+    // know which org an unauthenticated recovery attempt is even for.
     await auditLogModel.create({
+      organizationId: defaultOrganization.id,
       entityType,
       entityId: String(entityId),
       actor: 'public',
@@ -823,6 +930,13 @@ async function setup() {
     databaseReview: false,
   };
 
+  // Real TCP-connect probing against each device's declared IP — the
+  // network-device automations below used to derive "suspicious" purely
+  // from the device's own prior risk score (a self-referential drift that
+  // never actually contacted anything). This makes contact for real.
+  const deviceProbe = createDeviceProbe();
+  const notificationThrottle = createNotificationThrottle();
+
   const runDevicePassiveAutomation = async () => {
     if (automationLocks.devicePassive) return;
     automationLocks.devicePassive = true;
@@ -845,9 +959,15 @@ async function setup() {
         const due = !device.lastPassiveScanAt || (Date.now() - new Date(device.lastPassiveScanAt).getTime() >= intervalMs);
         if (!due) continue;
 
-        const suspicious = device.riskScore >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD || ['degraded', 'offline'].includes(device.state);
-        const nextRisk = suspicious ? Math.min(100, device.riskScore + 4) : Math.max(10, device.riskScore - 2);
         const startedAt = new Date();
+
+        // A device with no declared IP can't actually be contacted — treat
+        // that as unknown rather than guessing at a risk direction.
+        const probeResult = device.ipAddress
+          ? await deviceProbe.probe(device.ipAddress)
+          : { reachable: null, openPorts: [], highRiskOpenPorts: [] };
+        const suspicious = probeResult.reachable === false;
+        const nextRisk = suspicious ? Math.min(100, device.riskScore + 4) : Math.max(10, device.riskScore - 2);
 
         await device.update({
           passiveScanEnabled: true,
@@ -861,7 +981,7 @@ async function setup() {
           entityType: 'network_device',
           entityId: device.id,
           action: 'automation.passive_scan',
-          details: JSON.stringify({ suspicious, riskScore: nextRisk }),
+          details: JSON.stringify({ suspicious, reachable: probeResult.reachable, openPorts: probeResult.openPorts, riskScore: nextRisk }),
         });
 
         let finding = null;
@@ -873,7 +993,7 @@ async function setup() {
             category: 'network',
             severity: nextRisk >= 85 ? 'critical' : nextRisk >= 70 ? 'high' : 'medium',
             title: `Automated passive scan anomaly on ${device.name}`,
-            description: `Scheduled passive scan observed elevated network risk on ${device.name} (${device.deviceType}).`,
+            description: `Scheduled passive scan found ${device.name} (${device.deviceType}, ${device.ipAddress}) unreachable on every commonly-checked port — it may be down or unreachable from the command centre.`,
             evidence: `device=${device.name}; ip=${device.ipAddress || 'n/a'}; state=${device.state}; risk=${nextRisk}`,
             status: 'new',
             requiresManualConfirmation: false,
@@ -947,9 +1067,17 @@ async function setup() {
         const due = !device.lastIdsIpsEventAt || (Date.now() - new Date(device.lastIdsIpsEventAt).getTime() >= intervalMs);
         if (!due) continue;
 
-        const intrusionSignal = device.riskScore >= CONFIG.AUTOMATION_DEVICE_RISK_ALERT_THRESHOLD + 5 || device.deviceType === 'firewall';
-        const nextRisk = intrusionSignal ? Math.min(100, device.riskScore + 6) : Math.max(10, device.riskScore - 2);
         const startedAt = new Date();
+
+        const probeResult = device.ipAddress
+          ? await deviceProbe.probe(device.ipAddress)
+          : { reachable: null, openPorts: [], highRiskOpenPorts: [] };
+        // A real exposure signal — an actually-open, classically
+        // exploitable protocol (RDP/Telnet/FTP/VNC) — replaces the old
+        // "riskScore already high, or device is a firewall" heuristic,
+        // which never inspected the device at all.
+        const intrusionSignal = probeResult.highRiskOpenPorts.length > 0;
+        const nextRisk = intrusionSignal ? Math.min(100, device.riskScore + 6) : Math.max(10, device.riskScore - 2);
 
         await device.update({
           idsIpsEnabled: true,
@@ -963,11 +1091,12 @@ async function setup() {
           entityType: 'network_device',
           entityId: device.id,
           action: 'automation.ids_ips_check',
-          details: JSON.stringify({ intrusionSignal, riskScore: nextRisk }),
+          details: JSON.stringify({ intrusionSignal, highRiskOpenPorts: probeResult.highRiskOpenPorts, riskScore: nextRisk }),
         });
 
         let finding = null;
         if (intrusionSignal) {
+          const exposureList = probeResult.highRiskOpenPorts.map((p) => `port ${p.port} (${p.reason})`).join(', ');
           finding = await securityFindingModel.create({
             applicationAssetId: fallbackApp.id,
             sourceTool: 'IDS/IPS Scheduler',
@@ -975,8 +1104,8 @@ async function setup() {
             category: 'intrusion',
             severity: nextRisk >= 85 ? 'critical' : 'high',
             title: `Automated IDS/IPS intrusion signal on ${device.name}`,
-            description: `Scheduled IDS/IPS check detected suspicious network behavior on ${device.name}.`,
-            evidence: `device=${device.name}; type=${device.deviceType}; ip=${device.ipAddress || 'n/a'}; risk=${nextRisk}`,
+            description: `Scheduled IDS/IPS check found ${device.name} exposing ${exposureList} — a classic entry point if this device is internet-facing.`,
+            evidence: `device=${device.name}; type=${device.deviceType}; ip=${device.ipAddress || 'n/a'}; openPorts=${probeResult.openPorts.join(',')}; highRisk=${probeResult.highRiskOpenPorts.map((p) => p.port).join(',')}; risk=${nextRisk}`,
             status: 'new',
             requiresManualConfirmation: false,
             manualConfirmed: true,
@@ -1142,6 +1271,7 @@ async function setup() {
         ConnectorReceipt: connectorReceiptModel,
       },
       notifyTicket: notify,
+      defaultOrganizationId: defaultOrganization.id,
     }),
   );
 
@@ -1249,23 +1379,49 @@ async function setup() {
       SecurityFinding: securityFindingModel,
       TicketActionItem: ticketActionItemModel,
       TicketComment: ticketCommentModel,
+      ReportSnapshot: reportSnapshotModel,
     },
+  }));
+
+  // Platform-level organization management — Scratch Solid Solutions staff
+  // onboarding a new customer, not gated behind requireCompletedProfile
+  // (a platform_admin managing tenants isn't a regular operational-staff
+  // profile in the ordinary sense).
+  app.use('/api/platform', protectedApiLimiter, platformRouteFactory({
+    models: {
+      Organization: organizationModel,
+      User: userModel,
+      SecurityState: securityStateModel,
+    },
+    authMiddleware,
+    sendEmailNotification,
   }));
 
   // Schedule monthly report on the 1st at 9 AM
   cron.schedule('0 9 1 * *', async () => {
-    await sendMonthlyReport(ticketModel);
+    await forEachOrganization(() => sendMonthlyReport(ticketModel));
   });
 
-  // Ambient SOC live-feed event generation: inject 3-7 events every 2 minutes
-  cron.schedule('*/2 * * * *', () => {
-    const count = 3 + Math.floor(Math.random() * 5);
-    generateAndPushEvents(count);
+  // Flushes any high-severity alerts folded into a user's throttle window
+  // (see notificationThrottle.js) as a combined digest, once their window
+  // has elapsed.
+  cron.schedule('*/2 * * * *', async () => {
+    await forEachOrganization(() => flushNotificationDigests());
+  });
+
+  // Persists a daily snapshot of the executive report — reports were
+  // previously pure point-in-time JSON with nowhere for a trend line to
+  // come from. This builds real trend history going forward.
+  cron.schedule('0 6 * * *', async () => {
+    await forEachOrganization(async () => {
+      const report = await executiveReport({ Ticket: ticketModel, SecurityFinding: securityFindingModel });
+      await reportSnapshotModel.create({ type: 'executive', generatedAt: new Date(), payload: report });
+    });
   });
 
   // Passive and active scan schedules for the integrated security stack.
   cron.schedule('*/5 * * * *', async () => {
-    await runSecuritySweep({
+    await forEachOrganization(() => runSecuritySweep({
       mode: 'passive',
       actor: 'scheduler',
       models: {
@@ -1278,11 +1434,11 @@ async function setup() {
         ScanRunRecord: scanRunRecordModel,
       },
       notifyTicket: notify,
-    });
+    }));
   });
 
   cron.schedule('*/30 * * * *', async () => {
-    await runSecuritySweep({
+    await forEachOrganization(() => runSecuritySweep({
       mode: 'active',
       actor: 'scheduler',
       models: {
@@ -1294,34 +1450,22 @@ async function setup() {
         ScanRunRecord: scanRunRecordModel,
       },
       notifyTicket: notify,
-    });
+    }));
   });
 
   if (CONFIG.AUTOMATION_NETWORK_ENABLED) {
     cron.schedule(CONFIG.AUTOMATION_DEVICE_PASSIVE_CRON, async () => {
-      try {
-        await runDevicePassiveAutomation();
-      } catch (err) {
-        console.error('Device passive automation failed:', err);
-      }
+      await forEachOrganization(() => runDevicePassiveAutomation());
     });
 
     cron.schedule(CONFIG.AUTOMATION_DEVICE_IDS_CRON, async () => {
-      try {
-        await runDeviceIdsAutomation();
-      } catch (err) {
-        console.error('Device IDS/IPS automation failed:', err);
-      }
+      await forEachOrganization(() => runDeviceIdsAutomation());
     });
   }
 
   if (CONFIG.AUTOMATION_DATABASE_ENABLED) {
     cron.schedule(CONFIG.AUTOMATION_DATABASE_REVIEW_CRON, async () => {
-      try {
-        await runDatabaseReviewAutomation();
-      } catch (err) {
-        console.error('Database review automation failed:', err);
-      }
+      await forEachOrganization(() => runDatabaseReviewAutomation());
     });
   }
 
@@ -1342,6 +1486,8 @@ async function setup() {
     clearAuthAttemptState,
     writePublicAudit,
     sendEmailNotification,
+    runAsPlatformAdmin,
+    defaultOrganizationId: defaultOrganization.id,
   }));
 
   // Get current user info endpoint
@@ -1461,6 +1607,7 @@ async function setup() {
       const refreshedToken = jwt.sign(
         {
           sub: user.id,
+          organizationId: user.organizationId,
           username: user.username || user.name,
           role: user.role,
           audienceCode: profileState.audienceCode,
@@ -1490,6 +1637,15 @@ async function setup() {
       limit: 300,
     });
     res.json(rows);
+  });
+
+  // Real tamper detection, not just tamper logging: walks the full
+  // hash-chained audit trail and confirms every row's hash still matches
+  // its own content plus the previous row's hash. See verifyAuditChain's
+  // doc comment for the one known limitation (deleting the current last row).
+  app.get('/api/governance/audit-logs/verify', authMiddleware, protectedApiLimiter, governanceAccessMiddleware, async (_req, res) => {
+    const result = await verifyAuditChain(auditLogModel);
+    res.json(result);
   });
 
   app.get('/api/governance/workforce-telemetry', authMiddleware, protectedApiLimiter, governanceAccessMiddleware, async (_req, res) => {
@@ -1614,6 +1770,6 @@ export default app;
 // Run setup, start server only outside test environment, and export the ready promise
 export const ready = setup().then(() => {
   if (process.env.NODE_ENV !== 'test') {
-    app.listen(CONFIG.PORT, () => console.log(`Node backend running on port ${CONFIG.PORT}`));
+    app.listen(CONFIG.PORT, () => logger.info({ port: CONFIG.PORT }, 'Node backend running'));
   }
-}).catch(console.error);
+}).catch((err) => logger.error({ err }, 'Backend setup failed'));

@@ -3,6 +3,7 @@ import { DataTypes } from 'sequelize';
 export default (sequelize) => {
   return sequelize.define('ConnectorDeadLetter', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
+    organizationId: { type: DataTypes.INTEGER, allowNull: false },
     connectorName: { type: DataTypes.STRING(64), allowNull: false },
     externalEventId: { type: DataTypes.STRING(255), allowNull: true },
     status: {
