@@ -1,24 +1,78 @@
 name: Deploy
 
-# Deploys only after the full test/build/audit suite ("Sign-off Gates") has
-# already passed for this exact commit on main — this workflow never runs
-# its own copy of the tests, it just waits for that one to succeed first.
+# Triggers directly on push to main (not via a cross-workflow workflow_run
+# link to Sign-off Gates — that trigger type is known to skip unreliably on
+# its first association per commit, which is exactly what happened here).
+# Each deploy job instead `needs` its own test job below, so a failing test
+# still blocks that deploy, just within one self-contained workflow.
 on:
-  workflow_run:
-    workflows: ["Sign-off Gates"]
-    types:
-      - completed
+  push:
     branches: [main]
 
 jobs:
-  deploy-backend:
-    if: github.event.workflow_run.conclusion == 'success'
+  test-backend:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          ref: main
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: node-backend/package-lock.json
+      - run: cd node-backend && npm ci
+      - run: cd node-backend && npm test
+
+  test-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            agent/package-lock.json
+            node-backend/package-lock.json
+      - run: cd node-backend && npm ci
+      - run: cd agent && npm ci
+      - run: cd agent && npm test
+
+  test-sentinel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            sentinel/package-lock.json
+            node-backend/package-lock.json
+      - run: cd node-backend && npm ci
+      - run: cd sentinel && npm ci
+      - run: cd sentinel && npm test
+
+  test-frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend-v2/package-lock.json
+      - run: cd frontend-v2 && npm ci
+      - run: cd frontend-v2 && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-v2/dist
+
+  deploy-backend:
+    needs: [test-backend, test-agent, test-sentinel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Set up deploy key
         run: |
@@ -62,26 +116,14 @@ jobs:
           exit 1
 
   deploy-frontend:
-    if: github.event.workflow_run.conclusion == 'success'
+    needs: [test-frontend-build]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
         with:
-          ref: main
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend-v2/package-lock.json
-
-      - name: Install and build frontend
-        run: |
-          cd frontend-v2
-          npm ci
-          npm run build
+          name: frontend-dist
+          path: frontend-v2/dist
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
