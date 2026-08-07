@@ -69,8 +69,8 @@ export default function Settings() {
     try {
       const result = await updateProfile({
         audienceCode: form.audienceCode,
-        telegramNumber: isStaff ? form.telegramNumber.trim() : undefined,
-        telegramChatId: isStaff ? form.telegramChatId.trim() : undefined,
+        telegramNumber: form.telegramNumber.trim(),
+        telegramChatId: form.telegramChatId.trim(),
         operationalTeams: isStaff ? form.operationalTeams : [],
       });
       if (result.access_token) setToken(result.access_token);
@@ -142,22 +142,24 @@ export default function Settings() {
         </select>
 
         {isStaff && (
-          <>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-              {TEAM_OPTIONS.map((team) => (
-                <button
-                  key={team}
-                  onClick={() => toggleTeam(team)}
-                  style={btnStyle('var(--accent)', !form.operationalTeams.includes(team))}
-                >
-                  {team}
-                </button>
-              ))}
-            </div>
-            <input placeholder="Telegram phone number" value={form.telegramNumber} onChange={(e) => setForm({ ...form, telegramNumber: e.target.value })} style={inputStyle} />
-            <input placeholder="Telegram chat ID" value={form.telegramChatId} onChange={(e) => setForm({ ...form, telegramChatId: e.target.value })} style={inputStyle} />
-          </>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+            {TEAM_OPTIONS.map((team) => (
+              <button
+                key={team}
+                onClick={() => toggleTeam(team)}
+                style={btnStyle('var(--accent)', !form.operationalTeams.includes(team))}
+              >
+                {team}
+              </button>
+            ))}
+          </div>
         )}
+        {/* Telegram delivery applies to every role, not just operational
+            staff — managers/executives/stakeholders are exactly who
+            downtime and escalation alerts are meant to reach, so this must
+            never be hidden behind the isStaff check above. */}
+        <input placeholder="Telegram phone number" value={form.telegramNumber} onChange={(e) => setForm({ ...form, telegramNumber: e.target.value })} style={inputStyle} />
+        <input placeholder="Telegram chat ID" value={form.telegramChatId} onChange={(e) => setForm({ ...form, telegramChatId: e.target.value })} style={inputStyle} />
 
         <button disabled={busy} onClick={handleSaveProfile} style={btnStyle('var(--accent)', false)}>
           Save profile

@@ -1714,9 +1714,14 @@ async function setup() {
         return res.status(422).json({ error: 'Telegram chat ID is required for operational staff' });
       }
 
+      // Telegram delivery applies to every role, not just operational staff —
+      // a manager/executive/stakeholder setting their own chat ID is exactly
+      // how they'd receive escalation and downtime alerts. Only staff are
+      // *required* to set it (enforced above); everyone else's value, if
+      // provided, must actually be saved rather than silently discarded.
       await user.update({
-        telegramNumber: isOperationalStaff ? req.body.telegramNumber.trim() : null,
-        telegramChatId: isOperationalStaff ? req.body.telegramChatId.trim() : null,
+        telegramNumber: String(req.body.telegramNumber || '').trim() || null,
+        telegramChatId: String(req.body.telegramChatId || '').trim() || null,
         audienceCode,
         operationalTeams: isOperationalStaff ? operationalTeams : [],
         department: isOperationalStaff
