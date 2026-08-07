@@ -702,7 +702,12 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     },
   );
 
-  router.get('/health-summary', async (_req, res) => {
+  // Internal-only aggregate views (org-wide finding/patch/device counts,
+  // recent privileged staff actions) — missed in the earlier Phase 3 sweep
+  // that gated every other route like this. An owner (external client)
+  // role must never see this: it isn't scoped to just their own assets,
+  // and includes internal staff activity that isn't client-facing.
+  router.get('/health-summary', analystOrAdmin, async (_req, res) => {
     const cacheKey = 'health-summary';
     const cached = readAnalyticsCache(cacheKey);
     if (cached) return res.json(cached);
@@ -712,7 +717,8 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json(summary);
   });
 
-  router.get('/fortress/posture', async (_req, res) => {
+  // Same reasoning as /health-summary above.
+  router.get('/fortress/posture', analystOrAdmin, async (_req, res) => {
     const cacheKey = 'fortress-posture';
     const cached = readAnalyticsCache(cacheKey);
     if (cached) return res.json(cached);

@@ -72,6 +72,23 @@ import {
   pruneExpiredAuthRateLimits,
 } from './services/authRateLimit.js';
 
+// Most route handlers in this codebase are plain `async (req, res) => {}`
+// with no try/catch — Express 4 does not catch a rejected promise from an
+// async handler on its own, and Node terminates the whole process on an
+// unhandled rejection unless a listener is registered. Without this, a
+// single transient DB error in any one request could crash every in-flight
+// request on the server, not just that one — registering a listener here
+// (even one that only logs) is what stops Node from treating it as fatal.
+// This is a safety net, not a substitute for handlers catching their own
+// errors — it exists so a gap in any individual handler degrades to "one
+// hung request, logged" instead of "the whole process goes down."
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason }, 'Unhandled promise rejection — this would have crashed the process without this handler');
+});
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught exception — this would have crashed the process without this handler');
+});
+
 // Create Express application instance
 const app = express();
 const API_PERF_SAMPLE_SIZE = 200;

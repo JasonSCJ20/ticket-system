@@ -259,6 +259,12 @@ describe('owner role is blocked from internal-only routes', () => {
       '/api/security/executive-impact',
       '/api/security/threat-intel/overview',
       '/api/security/network-visibility/overview',
+      // Missed in the original Phase 3 sweep — found during a later
+      // production-readiness audit. Neither is scoped to just the owner's
+      // own assets, and fortress/posture includes real staff usernames
+      // from recent privileged actions, which is never client-facing.
+      '/api/security/health-summary',
+      '/api/security/fortress/posture',
     ];
     for (const path of paths) {
       const res = await request(app).get(path).set('Authorization', `Bearer ${ownerToken}`);
