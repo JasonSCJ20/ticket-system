@@ -121,14 +121,6 @@ export const initModels = async () => {
     defaults: { name: DEFAULT_ORGANIZATION_NAME, slug: DEFAULT_ORGANIZATION_SLUG },
   })).then(([org]) => org);
 
-  // SecurityState is one row per organization backing that tenant's own
-  // Fortress kill-switch tiers — ensure the default org's row always exists
-  // so callers never have to null-check it.
-  await runAsPlatformAdmin(() => securityStateModel.findOrCreate({
-    where: { organizationId: defaultOrganization.id },
-    defaults: { organizationId: defaultOrganization.id },
-  }));
-
   if (process.env.NODE_ENV !== 'test') {
     const queryInterface = sequelize.getQueryInterface();
 
@@ -184,6 +176,38 @@ export const initModels = async () => {
       });
       await sequelize.query(`ALTER TABLE "${tableName}" ALTER COLUMN "${columnName}" SET NOT NULL`);
     };
+
+    // Phase 1 multi-tenancy migration: every tenant-scoped table gets an
+    // organizationId column, backfilled to the one default organization
+    // (every row that already existed predates multi-tenancy, so it all
+    // belongs there), then tightened to NOT NULL. Additive and safe to run
+    // repeatedly — each step is a no-op once already applied. Deliberately
+    // runs FIRST, before any other migration step or tenant-scoped query in
+    // this function (including the SecurityState/AuditLog work below) — on
+    // a database that predates multi-tenancy, anything that queries a
+    // tenant-scoped model before this loop adds the column will crash with
+    // "column organizationId does not exist", which is exactly what
+    // happened in production the one time this ordering was wrong.
+    const tenantScopedTables = [
+      'Users', 'Tickets', 'TicketHistories', 'TicketAssets', 'ApplicationAssets', 'SecurityFindings',
+      'ConnectorDeadLetters', 'TicketResolutionReports', 'AuditLogs', 'TicketComments',
+      'TicketActionItems', 'ConnectorReceipts', 'NetworkDevices', 'DatabaseAssets',
+      'PatchTasks', 'ScanRunRecords', 'NotificationLedgers', 'SecurityStates', 'AgentCommands',
+      'VisitorEvents',
+    ];
+    for (const tableName of tenantScopedTables) {
+      await ensureColumn(tableName, 'organizationId', { type: DataTypes.INTEGER, allowNull: true });
+      await ensureNotNullWithBackfill(tableName, 'organizationId', defaultOrganization.id);
+    }
+
+    // SecurityState is one row per organization backing that tenant's own
+    // Fortress kill-switch tiers — ensure the default org's row always
+    // exists so callers never have to null-check it. Must run after the
+    // organizationId migration above, not before (see comment there).
+    await runAsPlatformAdmin(() => securityStateModel.findOrCreate({
+      where: { organizationId: defaultOrganization.id },
+      defaults: { organizationId: defaultOrganization.id },
+    }));
 
     await ensureColumn('Users', 'username', { type: DataTypes.STRING, allowNull: true });
     await ensureColumn('Users', 'surname', { type: DataTypes.STRING, allowNull: true });
@@ -298,23 +322,6 @@ export const initModels = async () => {
         }
       }
     });
-
-    // Phase 1 multi-tenancy migration: every tenant-scoped table gets an
-    // organizationId column, backfilled to the one default organization
-    // (every row that already existed predates multi-tenancy, so it all
-    // belongs there), then tightened to NOT NULL. Additive and safe to run
-    // repeatedly — each step is a no-op once already applied.
-    const tenantScopedTables = [
-      'Users', 'Tickets', 'TicketHistories', 'TicketAssets', 'ApplicationAssets', 'SecurityFindings',
-      'ConnectorDeadLetters', 'TicketResolutionReports', 'AuditLogs', 'TicketComments',
-      'TicketActionItems', 'ConnectorReceipts', 'NetworkDevices', 'DatabaseAssets',
-      'PatchTasks', 'ScanRunRecords', 'NotificationLedgers', 'SecurityStates', 'AgentCommands',
-      'VisitorEvents',
-    ];
-    for (const tableName of tenantScopedTables) {
-      await ensureColumn(tableName, 'organizationId', { type: DataTypes.INTEGER, allowNull: true });
-      await ensureNotNullWithBackfill(tableName, 'organizationId', defaultOrganization.id);
-    }
 
     // ApplicationAssets/NetworkDevices/DatabaseAssets previously had a
     // globally-unique `name` — two different customer organizations may
