@@ -1,0 +1,93 @@
+name: Deploy
+
+# Deploys only after the full test/build/audit suite ("Sign-off Gates") has
+# already passed for this exact commit on main — this workflow never runs
+# its own copy of the tests, it just waits for that one to succeed first.
+on:
+  workflow_run:
+    workflows: ["Sign-off Gates"]
+    types:
+      - completed
+    branches: [main]
+
+jobs:
+  deploy-backend:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up deploy key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.HETZNER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.HETZNER_HOST }}" >> ~/.ssh/known_hosts
+
+      # Always sync package.json/package-lock.json together with src/ — a
+      # real incident happened once from syncing src/ alone while a
+      # dependency was added, which let Docker reuse a stale npm-ci layer
+      # missing that dependency until the drift was eventually noticed.
+      - name: Sync backend source to the server
+        run: |
+          rsync -avz --checksum -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
+            node-backend/package.json node-backend/package-lock.json \
+            "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:/opt/ScratchSolidSolutions/infra/soc-backend/"
+          rsync -avz --checksum --delete -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes" \
+            node-backend/src/ \
+            "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}:/opt/ScratchSolidSolutions/infra/soc-backend/src/"
+
+      # Scoped to just this one container — the same Hetzner box also runs
+      # erpnext_*/calcom_*/n8n_*/scratch_traefik for unrelated services,
+      # which --no-deps ensures this never touches.
+      - name: Rebuild and restart soc-api
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "${{ secrets.HETZNER_USER }}@${{ secrets.HETZNER_HOST }}" \
+            "cd /opt/ScratchSolidSolutions/infra && docker compose build soc-api && docker compose up -d --no-deps soc-api"
+
+      - name: Verify the deployed backend is actually healthy
+        run: |
+          for i in $(seq 1 12); do
+            sleep 5
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://soc-api.scratchsolidsolutions.org/api/healthz/deep || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Backend healthy (deep healthcheck 200)."
+              exit 0
+            fi
+          done
+          echo "Backend did not report healthy within 60s after deploy — check the server directly."
+          exit 1
+
+  deploy-frontend:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend-v2/package-lock.json
+
+      - name: Install and build frontend
+        run: |
+          cd frontend-v2
+          npm ci
+          npm run build
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: commandcentre
+          directory: frontend-v2/dist
+          branch: main
