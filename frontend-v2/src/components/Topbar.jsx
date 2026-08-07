@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import ThemeToggle from './ThemeToggle.jsx';
 import { useAuth } from '../auth/AuthContext.jsx';
 
@@ -17,9 +18,13 @@ export default function Topbar({ title }) {
         <button onClick={logout} style={styles.signOut}>
           Sign out
         </button>
-        <div style={styles.avatar} title={username || ''}>
+        {/* Was a plain non-interactive div — looked clickable (round avatar,
+            top-right corner) but did nothing, which read as broken. Now
+            actually opens Settings, the one place profile/Telegram details
+            live. */}
+        <Link to="/settings" style={styles.avatar} title={`${username || ''} — Settings`}>
           {initials(username)}
-        </div>
+        </Link>
       </div>
     </header>
   );
@@ -56,5 +61,7 @@ const styles = {
     justifyContent: 'center',
     fontSize: 11,
     fontWeight: 700,
+    textDecoration: 'none',
+    cursor: 'pointer',
   },
 };
