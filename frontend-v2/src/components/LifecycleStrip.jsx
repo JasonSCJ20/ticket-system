@@ -1,14 +1,4 @@
-import { LIFECYCLE_STAGES } from '../api/tickets.js';
-
-const LABELS = {
-  identified: 'Identified',
-  triaged: 'Triaged',
-  contained: 'Contained',
-  eradicated: 'Eradicated',
-  recovered: 'Recovered',
-  postmortem: 'Postmortem',
-  closed: 'Closed',
-};
+import { LIFECYCLE_STAGES, LIFECYCLE_LABELS } from '../api/tickets.js';
 
 export default function LifecycleStrip({ tickets, activeStage, onSelect }) {
   const counts = LIFECYCLE_STAGES.reduce((acc, stage) => {
@@ -17,13 +7,14 @@ export default function LifecycleStrip({ tickets, activeStage, onSelect }) {
   }, {});
 
   return (
-    <div style={{ display: 'flex', gap: 6, marginBottom: 14 }}>
+    <div style={{ display: 'flex', gap: 6, marginBottom: 14, flexWrap: 'wrap' }}>
       {LIFECYCLE_STAGES.map((stage) => (
         <button
           key={stage}
           onClick={() => onSelect(activeStage === stage ? null : stage)}
           style={{
             flex: 1,
+            minWidth: 90,
             textAlign: 'center',
             background: 'var(--surface)',
             border: activeStage === stage ? '1px solid var(--accent)' : '1px solid var(--border)',
@@ -34,8 +25,8 @@ export default function LifecycleStrip({ tickets, activeStage, onSelect }) {
           }}
         >
           <div style={{ fontSize: 17, fontWeight: 700 }}>{counts[stage]}</div>
-          <div style={{ fontSize: 9.5, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.3, marginTop: 2 }}>
-            {LABELS[stage]}
+          <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: 2 }}>
+            {LIFECYCLE_LABELS[stage]}
           </div>
         </button>
       ))}

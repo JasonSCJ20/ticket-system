@@ -37,3 +37,6 @@ node-backend/ticket_system_node.db
 .DS_Store
 Thumbs.db
 .vscode/*.log
+
+# Local tooling config
+.claude/

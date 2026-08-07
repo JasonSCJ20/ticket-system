@@ -16,8 +16,10 @@ const models = () => ({
   SecurityFinding: sequelize.models.SecurityFinding,
   Ticket: sequelize.models.Ticket,
   TicketHistory: sequelize.models.TicketHistory,
+  TicketAsset: sequelize.models.TicketAsset,
   ScanRunRecord: sequelize.models.ScanRunRecord,
   AuditLog: sequelize.models.AuditLog,
+  PatchTask: sequelize.models.PatchTask,
 });
 const notifyTicket = async () => {};
 let defaultOrgId;
@@ -129,5 +131,60 @@ describe('runSecuritySweep (real orchestration, faked scanner processes)', () =>
     const runs = await sequelize.models.ScanRunRecord.findAll({ where: { assetId: app.id, toolName: 'Nuclei' } });
     expect(runs[0].status).toBe('failed');
     expect(runs[0].detail).toContain('nuclei binary not found');
+  }));
+
+  it('active mode: a Trivy finding with a real fixedVersion automatically creates an autoDetected PatchTask', async () => runWithOrganization(defaultOrgId, async () => {
+    await sequelize.models.SecurityFinding.destroy({ where: {} });
+    await sequelize.models.PatchTask.destroy({ where: {} });
+
+    const scanners = {
+      gitleaks: { scan: jest.fn().mockResolvedValue([]) },
+      trivy: { scan: jest.fn().mockResolvedValue([
+        {
+          cveId: 'CVE-2023-99999',
+          package: 'lodash',
+          installedVersion: '4.17.15',
+          fixedVersion: '4.17.21',
+          severity: 'high',
+          title: 'Prototype pollution in lodash',
+          target: 'package-lock.json',
+          url: 'https://nvd.nist.gov/vuln/detail/CVE-2023-99999',
+        },
+        {
+          // No fix available yet — must NOT create a PatchTask for this one.
+          cveId: 'CVE-2023-88888',
+          package: 'left-pad',
+          installedVersion: '1.0.0',
+          fixedVersion: null,
+          severity: 'medium',
+          title: 'Unpatched issue in left-pad',
+          target: 'package-lock.json',
+          url: null,
+        },
+      ]) },
+      semgrep: { scan: jest.fn().mockResolvedValue([]) },
+      nuclei: { scan: jest.fn().mockResolvedValue([]) },
+    };
+
+    const created = await runSecuritySweep({ mode: 'active', actor: 'scheduler', models: models(), notifyTicket, scanners });
+    const trivyFinding = created.find((f) => f.sourceTool === 'Trivy' && f.cveId === 'CVE-2023-99999');
+    expect(trivyFinding).toBeTruthy();
+
+    const tasks = await sequelize.models.PatchTask.findAll();
+    expect(tasks.length).toBe(1);
+    const task = tasks[0];
+    expect(task.title).toBe('Update to fix: CVE-2023-99999: Prototype pollution in lodash');
+    expect(task.currentVersion).toBe('4.17.15');
+    expect(task.targetVersion).toBe('4.17.21');
+    expect(task.severity).toBe('high');
+    expect(task.autoDetected).toBe(true);
+    expect(task.createdBy).toBe('Trivy (automatic)');
+    expect(task.assetType).toBe('application');
+
+    // Re-running the sweep with the same Trivy output must not create a
+    // second PatchTask for the same finding.
+    await runSecuritySweep({ mode: 'active', actor: 'scheduler', models: models(), notifyTicket, scanners });
+    const tasksAfterRerun = await sequelize.models.PatchTask.findAll();
+    expect(tasksAfterRerun.length).toBe(1);
   }));
 });

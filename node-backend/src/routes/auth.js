@@ -56,6 +56,7 @@ export default function authRouteFactory({
   sendEmailNotification,
   runAsPlatformAdmin,
   defaultOrganizationId,
+  flagUnfamiliarLogin,
 }) {
   const router = express.Router();
 
@@ -495,13 +496,23 @@ export default function authRouteFactory({
       const jti = randomUUID();
       const now = new Date();
       const audienceCode = String(user.audienceCode || '').trim().toUpperCase() || null;
+      // Behind a reverse proxy, req.ip is the proxy's own address — the same
+      // x-forwarded-for resolution already used at /api/me and /api/heartbeat
+      // is needed here too, since the unfamiliar-location check below is
+      // only as accurate as the IP it's given.
+      const loginIp = (req.headers['x-forwarded-for']?.split(',')[0]?.trim()) || req.ip || null;
       await user.update({
         lastLoginAt: now,
-        lastLoginIp: req.ip || null,
+        lastLoginIp: loginIp,
         lastSeenAt: now,
-        lastSeenIp: req.ip || null,
+        lastSeenIp: loginIp,
         lastSeenUserAgent: String(req.get('user-agent') || '').slice(0, 512) || null,
         isOnline: true,
+      });
+
+      // Best-effort and must never block or fail the login itself.
+      flagUnfamiliarLogin(user, loginIp).catch((err) => {
+        logger.error({ err, userId: user.id }, 'Unfamiliar login location check failed');
       });
 
       const token = jwt.sign(

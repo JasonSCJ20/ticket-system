@@ -44,12 +44,42 @@ function lifecycleTimestampPatch(stage) {
 export default (models, notify) => {
   const { notifyTicket, sendAssignmentGuidance, sendResolutionReport, writeAudit } = notify;
   // Destructure models
-  const { Ticket, User, TicketResolutionReport, TicketComment, TicketActionItem } = models;
+  const {
+    Ticket, User, TicketResolutionReport, TicketComment, TicketActionItem, TicketAsset,
+    ApplicationAsset, NetworkDevice, DatabaseAsset,
+  } = models;
+
+  const ASSET_MODEL_BY_TYPE = {
+    application: ApplicationAsset,
+    network_device: NetworkDevice,
+    database_asset: DatabaseAsset,
+  };
+
+  // Every ticket must name at least one real, currently-existing registered
+  // asset — resolves each {assetType, assetId} pair against the actual table
+  // rather than trusting a client-supplied name, so WHERE is always accurate.
+  const resolveAssetLink = async (link) => {
+    const Model = ASSET_MODEL_BY_TYPE[link?.assetType];
+    if (!Model) return null;
+    const asset = await Model.findByPk(Number(link.assetId));
+    if (!asset) return null;
+    return { assetType: link.assetType, assetId: asset.id, assetName: asset.name };
+  };
 
   const adminOnly = (req, res, next) => {
     if (req.user?.role === 'admin') return next();
     return res.status(403).json({ error: 'Insufficient permissions' });
   };
+
+  // Tickets are SCJ's internal incident/support workflow — there's no
+  // owner-facing concept here at all (no ownerEmail, no asset FK), so unlike
+  // ApplicationAsset/SecurityFinding this whole router is analyst/admin only.
+  // Gated at the router level rather than per-route so a newly added route
+  // is safe by default instead of needing its own opt-in check.
+  router.use((req, res, next) => {
+    if (req.user?.role === 'admin' || req.user?.role === 'analyst') return next();
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  });
 
   const scopedActor = (req) => req.user?.username || 'system';
 
@@ -84,11 +114,14 @@ export default (models, notify) => {
     // used for user-facing responses in src/routes/users.js and auth.js)
       const tickets = await Ticket.findAll({
         where,
-        include: [{
-          model: User,
-          as: 'assignee',
-          attributes: { exclude: ['password_hash', 'mfaSecret', 'resetPasswordCode', 'resetPasswordCodeExpiresAt'] },
-        }],
+        include: [
+          {
+            model: User,
+            as: 'assignee',
+            attributes: { exclude: ['password_hash', 'mfaSecret', 'resetPasswordCode', 'resetPasswordCodeExpiresAt'] },
+          },
+          { model: TicketAsset, as: 'assets' },
+        ],
         order: [['createdAt', 'DESC']],
       });
     // Return tickets as JSON
@@ -144,6 +177,11 @@ export default (models, notify) => {
     body('assigneeId').optional().isString().trim().matches(SCJ_ID_REGEX),
     // Validate creatorId: optional integer
     body('creatorId').optional().isInt(),
+    // Every ticket must name at least one real registered asset — see
+    // resolveAssetLink above for why this can't be free text.
+    body('assetLinks').isArray({ min: 1 }).withMessage('At least one affected asset is required'),
+    body('assetLinks.*.assetType').isIn(Object.keys(ASSET_MODEL_BY_TYPE)),
+    body('assetLinks.*.assetId').isInt({ min: 1 }),
     async (req, res) => {
       // Check for validation errors
       const errors = validationResult(req);
@@ -161,6 +199,11 @@ export default (models, notify) => {
         }
       }
 
+      const resolvedLinks = await Promise.all(req.body.assetLinks.map(resolveAssetLink));
+      if (resolvedLinks.some((link) => !link)) {
+        return res.status(422).json({ error: 'One or more referenced assets were not found' });
+      }
+
       // Create ticket in database
       const ticket = await Ticket.create({
         title,
@@ -175,6 +218,7 @@ export default (models, notify) => {
         impactedServices: req.body.impactedServices || null,
         governanceTags: Array.isArray(req.body.governanceTags) ? req.body.governanceTags : [],
       });
+      await TicketAsset.bulkCreate(resolvedLinks.map((link) => ({ ticketId: ticket.id, ...link })));
       // Add history entry
       await models.TicketHistory.create({ ticketId: ticket.id, eventType: 'created', reason: 'Created by API' });
       await writeTicketAudit(req, ticket.id, 'ticket.created', JSON.stringify({ priority, assigneeId: assigneeId || null }));
@@ -253,6 +297,10 @@ export default (models, notify) => {
         slaDueAt,
         breachedSla,
         assigneeId: req.body.assigneeId,
+        resolutionNotes: req.body.resolutionNotes,
+        rootCause: req.body.rootCause,
+        actionsTaken: req.body.actionsTaken,
+        preventiveActions: req.body.preventiveActions,
         ...stagePayload,
       };
       await ticket.update(updatePayload);

@@ -4,6 +4,10 @@ export default (sequelize) => {
   return sequelize.define('NetworkDevice', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
     organizationId: { type: DataTypes.INTEGER, allowNull: false },
+    // Optional — mirrors DatabaseAsset.applicationAssetId, for the same reason:
+    // lets a device be grouped under the application it serves on the
+    // Overview tab instead of always showing as an unrelated top-level asset.
+    applicationAssetId: { type: DataTypes.INTEGER, allowNull: true },
     name: { type: DataTypes.STRING(128), allowNull: false },
     deviceType: { type: DataTypes.ENUM('router', 'switch', 'access_point', 'endpoint', 'firewall', 'server', 'other'), allowNull: false, defaultValue: 'endpoint' },
     ipAddress: { type: DataTypes.STRING(64), allowNull: true },

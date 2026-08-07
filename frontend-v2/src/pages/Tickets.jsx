@@ -1,15 +1,16 @@
 import { useState, useMemo } from 'react';
 import { useApi } from '../hooks/useApi.js';
 import { fetchTickets } from '../api/tickets.js';
-import { Card, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, ErrorState, StatCard, StatCardRow, Chip } from '../components/ui.jsx';
 import LifecycleStrip from '../components/LifecycleStrip.jsx';
 import TicketDetail from './TicketDetail.jsx';
 
-function slaShortLabel(t) {
-  if (!t.slaDueAt) return '—';
+function slaLabel(t) {
+  if (!t.slaDueAt) return null;
   const diffMs = new Date(t.slaDueAt).getTime() - Date.now();
-  const hours = diffMs / 36e5;
-  return `${diffMs < 0 ? '-' : ''}${Math.abs(hours).toFixed(1)}h`;
+  const hours = Math.abs(diffMs) / 36e5;
+  const label = hours >= 1 ? `${hours.toFixed(0)}h` : `${Math.round(hours * 60)}m`;
+  return diffMs < 0 ? `Overdue ${label}` : `${label} left`;
 }
 
 export default function Tickets() {
@@ -23,11 +24,26 @@ export default function Tickets() {
     return tickets.filter((t) => t.lifecycleStage === activeStage);
   }, [tickets, activeStage]);
 
+  const kpis = useMemo(() => {
+    if (!tickets) return { open: 0, overdue: 0, closedThisWeek: 0 };
+    const open = tickets.filter((t) => t.status !== 'closed').length;
+    const overdue = tickets.filter((t) => t.slaDueAt && new Date(t.slaDueAt) < new Date() && t.status !== 'closed' && t.status !== 'resolved').length;
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const closedThisWeek = tickets.filter((t) => t.status === 'closed' && t.closedAt && new Date(t.closedAt).getTime() >= weekAgo).length;
+    return { open, overdue, closedThisWeek };
+  }, [tickets]);
+
   if (error) return <ErrorState error={error} onRetry={reload} />;
   if (loading) return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading tickets…</p>;
 
   return (
     <div>
+      <StatCardRow>
+        <StatCard label="Open tickets" value={kpis.open} />
+        <StatCard label="Overdue" value={kpis.overdue} tone={kpis.overdue > 0 ? 'danger' : undefined} />
+        <StatCard label="Closed this week" value={kpis.closedThisWeek} />
+      </StatCardRow>
+
       <LifecycleStrip tickets={tickets} activeStage={activeStage} onSelect={setActiveStage} />
 
       <div style={{ display: 'grid', gridTemplateColumns: selected ? '1.4fr 1fr' : '1fr', gap: 12 }}>
@@ -35,36 +51,38 @@ export default function Tickets() {
           {filtered.length === 0 ? (
             <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>No tickets in this view.</p>
           ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>ID</th>
-                  <th style={thStyle}>Title</th>
-                  <th style={thStyle}>Priority</th>
-                  <th style={thStyle}>Stage</th>
-                  <th style={thStyle}>SLA</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((t) => (
-                  <tr
+            <div style={{ display: 'flex', flexDirection: 'column' }}>
+              {filtered.map((t, i) => {
+                const sla = slaLabel(t);
+                const isOverdue = sla?.startsWith('Overdue');
+                return (
+                  <div
                     key={t.id}
                     onClick={() => setSelected(t)}
-                    style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer', background: selected?.id === t.id ? 'var(--accent-soft)' : 'transparent' }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      padding: '12px 4px',
+                      borderTop: i === 0 ? 'none' : '1px solid var(--border)',
+                      cursor: 'pointer',
+                      background: selected?.id === t.id ? 'var(--accent-soft)' : 'transparent',
+                      borderRadius: 'var(--radius)',
+                    }}
                   >
-                    <td style={tdStyle}>CC-{t.id}</td>
-                    <td style={tdStyle}>{t.title}</td>
-                    <td style={tdStyle}>
-                      <Badge tone={t.priority}>{t.priority}</Badge>
-                    </td>
-                    <td style={tdStyle}>{t.lifecycleStage}</td>
-                    <td style={{ ...tdStyle, textAlign: 'right', color: t.breachedSla ? 'var(--danger)' : 'var(--text-muted)' }}>
-                      {slaShortLabel(t)}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: t.priority === 'critical' || t.priority === 'high' ? 'var(--danger)' : t.priority === 'medium' ? 'var(--warning)' : 'var(--text-muted)', flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontSize: 14, margin: 0 }}>{t.title}</p>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                        {(t.assets || []).map((a) => <Chip key={a.id}>{a.assetName}</Chip>)}
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t.assignee ? `${t.assignee.name || ''} ${t.assignee.surname || ''}`.trim() : 'Unassigned'}</span>
+                      </div>
+                    </div>
+                    {sla && <span style={{ fontSize: 12, fontWeight: 500, color: isOverdue ? 'var(--danger)' : 'var(--text-muted)', whiteSpace: 'nowrap' }}>{sla}</span>}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </Card>
 
@@ -82,6 +100,3 @@ export default function Tickets() {
     </div>
   );
 }
-
-const thStyle = { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 600, fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.3, padding: '6px 8px', borderBottom: '1px solid var(--border)' };
-const tdStyle = { padding: '8px 8px' };

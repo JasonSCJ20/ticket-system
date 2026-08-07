@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { body, param, validationResult } from 'express-validator';
 import { runAsPlatformAdmin, runWithOrganization } from '../services/tenantContext.js';
+import { encryptAssetCredential } from '../services/assetSecrets.js';
 
 // Real, cryptographically-random temp password, guaranteed to satisfy
 // validatePassword's rules (12+ chars, upper/lower/digit/special) rather
@@ -128,6 +129,35 @@ export default function platformRouteFactory({ models, authMiddleware, sendEmail
       ).catch(() => {});
 
       return res.status(201).json({ id: created.id, username, email: created.email, organizationId: org.id });
+    },
+  );
+
+  // Issues (or rotates) this organization's own connector secret, used to
+  // authenticate its Wazuh/Suricata/Prometheus feeds instead of the single
+  // global CONFIG.CONNECTOR_SHARED_SECRET every tenant used to share — see
+  // routes/securityConnectors.js's resolveConnectorSecret. Shown once, same
+  // pattern as agent-key issuance: the server only ever stores it encrypted.
+  router.post(
+    '/organizations/:id/connector-secret',
+    authMiddleware,
+    platformAdminOnly,
+    param('id').isInt(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const org = await runAsPlatformAdmin(() => Organization.findByPk(req.params.id));
+      if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+      const rawSecret = crypto.randomBytes(32).toString('hex');
+      await org.update({ connectorSecret: encryptAssetCredential(rawSecret) });
+
+      return res.status(201).json({
+        connectorSecret: rawSecret,
+        header: 'x-connector-org',
+        organizationSlug: org.slug,
+        warning: 'This secret will not be shown again. Store it securely — send it with every connector request as x-connector-secret, alongside x-connector-org: ' + org.slug + '.',
+      });
     },
   );
 

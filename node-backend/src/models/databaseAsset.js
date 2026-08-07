@@ -4,6 +4,11 @@ export default (sequelize) => {
   return sequelize.define('DatabaseAsset', {
     id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
     organizationId: { type: DataTypes.INTEGER, allowNull: false },
+    // Optional — not every database belongs to a registered application, but
+    // when it does (e.g. "Booking app"'s own database) this is what lets the
+    // Overview tab group it under its parent instead of showing it as an
+    // unrelated top-level asset.
+    applicationAssetId: { type: DataTypes.INTEGER, allowNull: true },
     name: { type: DataTypes.STRING(128), allowNull: false },
     engine: { type: DataTypes.ENUM('postgresql', 'mysql', 'mssql', 'oracle', 'mongodb', 'redis', 'other'), allowNull: false, defaultValue: 'postgresql' },
     environment: { type: DataTypes.ENUM('on_prem', 'cloud', 'hybrid'), allowNull: false, defaultValue: 'on_prem' },

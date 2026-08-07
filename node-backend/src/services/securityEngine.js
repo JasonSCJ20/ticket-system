@@ -62,6 +62,12 @@ const SELF_SCAN_HANDLERS = {
       description: `${vuln.package}@${vuln.installedVersion} in ${vuln.target} is affected by ${vuln.cveId}.${vuln.fixedVersion ? ` Fixed in ${vuln.fixedVersion}.` : ' No fix currently available.'}`,
       evidence: JSON.stringify(vuln),
       cveId: vuln.cveId,
+      // Carried through (not just embedded in description/evidence text) so
+      // runSelfScans can turn a real fix-available CVE straight into a
+      // PatchTask instead of that data dead-ending as descriptive text.
+      package: vuln.package,
+      installedVersion: vuln.installedVersion,
+      fixedVersion: vuln.fixedVersion,
     }));
   },
   async Semgrep(scanners, sourcePath) {
@@ -135,7 +141,7 @@ async function resolveApplication({ ApplicationAsset, appName, appUrl, environme
 }
 
 async function autoCreateTicketForFinding({ finding, app, models, notifyTicket }) {
-  const { Ticket, TicketHistory } = models;
+  const { Ticket, TicketHistory, TicketAsset } = models;
   const priority = finding.severity === 'critical'
     ? 'critical'
     : finding.severity === 'high'
@@ -148,6 +154,13 @@ async function autoCreateTicketForFinding({ finding, app, models, notifyTicket }
     priority,
     status: 'open',
     assigneeId: null,
+  });
+
+  await TicketAsset.create({
+    ticketId: ticket.id,
+    assetType: 'application',
+    assetId: app.id,
+    assetName: app.name,
   });
 
   await TicketHistory.create({
@@ -275,6 +288,42 @@ export async function ingestFinding({
   return { finding, created: true };
 }
 
+// Turns a genuinely-new Trivy finding with a real fix available into a
+// PatchTask automatically, instead of that installedVersion/fixedVersion
+// data dead-ending as descriptive text inside SecurityFinding.description.
+// Guarded against duplicates on repeat scans (same asset + title), and a
+// no-op if PatchTask wasn't threaded into this call's models (older
+// callers/tests that don't care about patch tasks shouldn't break).
+async function autoCreatePatchTaskFromTrivyFinding({ models, app, raw }) {
+  const { PatchTask } = models;
+  if (!PatchTask || !raw.fixedVersion) return null;
+
+  const title = `Update to fix: ${raw.title || raw.package}`;
+
+  const existingTask = await PatchTask.findOne({
+    where: {
+      assetType: 'application',
+      assetId: app.id,
+      title,
+    },
+  });
+  if (existingTask) return existingTask;
+
+  return PatchTask.create({
+    assetType: 'application',
+    assetId: app.id,
+    assetName: app.name,
+    title,
+    description: `Trivy detected ${raw.package}@${raw.installedVersion} is affected by ${raw.cveId || 'a known vulnerability'}. Fix available in ${raw.fixedVersion}.`,
+    severity: normalizeSeverity(raw.severity),
+    currentVersion: raw.installedVersion || null,
+    targetVersion: raw.fixedVersion,
+    status: 'todo',
+    autoDetected: true,
+    createdBy: 'Trivy (automatic)',
+  });
+}
+
 async function recordSkippedToolRun({ ScanRunRecord, AuditLog, tool, mode, actor, assetType, assetId, assetName, assetRef, reason }) {
   await recordScanRun({
     ScanRunRecord,
@@ -348,6 +397,14 @@ async function runSelfScans({ models, notifyTicket, actor, scanners, tools }) {
         if (created) {
           toolFindings.push(finding);
           createdFindings.push(finding);
+
+          // Only for a genuinely new finding (not a repeat-scan dedup
+          // update) and only for Trivy, since that's the scanner that
+          // reports a real fixedVersion — Gitleaks/Semgrep hits don't map
+          // to a version bump the way a dependency CVE does.
+          if (tool.name === 'Trivy') {
+            await autoCreatePatchTaskFromTrivyFinding({ models, app: platformApp, raw });
+          }
         }
       }
 

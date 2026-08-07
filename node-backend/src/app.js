@@ -19,7 +19,7 @@ import bcrypt from 'bcryptjs';
 // Import configuration
 import { CONFIG } from './config.js';
 // Import database models initialization
-import { initModels } from './models/index.js';
+import { initModels, sequelize } from './models/index.js';
 // Import Telegram bot functions
 import { bot, sendTelegramMessage, ticketText } from './telegram.js';
 import { sendEmailNotification } from './mailer.js';
@@ -40,6 +40,8 @@ import automationRouteFactory from './routes/automation.js';
 import webhooksRouteFactory from './routes/webhooks.js';
 import platformRouteFactory from './routes/platform.js';
 import { runSecuritySweep, healthSummary } from './services/securityEngine.js';
+import { runDowntimeSweep } from './services/downtimeMonitor.js';
+import { evaluateLoginGeo } from './services/loginAnomaly.js';
 import { recordScanRun } from './services/scanRunLedger.js';
 import { pushScanToolEvent } from './services/socLiveFeed.js';
 import { recordToolSchedulerRun } from './services/toolRegistry.js';
@@ -304,6 +306,21 @@ app.get('/api/healthz', (_req, res) => {
   res.status(200).json({ status: 'ok', service: 'node-backend', timestamp: new Date().toISOString() });
 });
 
+// Deep health check for an external watcher (Uptime Kuma) — the shallow
+// /api/healthz above only proves the process is alive, which is useless for
+// the "process is up but the database is unreachable" case: nothing inside
+// a request handler that itself needs the database can report on the
+// database being down. This route can, since it checks it directly and
+// returns a real failing status code rather than a 200.
+app.get('/api/healthz/deep', async (_req, res) => {
+  try {
+    await sequelize.authenticate();
+    res.status(200).json({ status: 'ok', database: 'ok', timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(503).json({ status: 'degraded', database: 'unreachable', error: String(err?.message || err), timestamp: new Date().toISOString() });
+  }
+});
+
 // Middleware function for JWT authentication
 async function authMiddleware(req, res, next) {
   // Get authorization header
@@ -415,6 +432,7 @@ async function setup() {
     userModel,
     ticketModel,
     ticketHistoryModel,
+    ticketAssetModel,
     applicationAssetModel,
     securityFindingModel,
     connectorDeadLetterModel,
@@ -432,6 +450,7 @@ async function setup() {
     agentCommandModel,
     securityStateModel,
     reportSnapshotModel,
+    visitorEventModel,
   } = await initModels();
 
   initSecurityStateCache(securityStateModel, organizationModel);
@@ -489,6 +508,16 @@ async function setup() {
         : 90;
       const cutoff = new Date(Date.now() - (retentionDays * 24 * 60 * 60 * 1000));
       await notificationLedgerModel.destroy({ where: { createdAt: { [Op.lte]: cutoff } } });
+    });
+  });
+
+  // No visitor-log retention policy had been specified when this was built —
+  // 90 days assumed as a reasonable default (see the model-level comment on
+  // VisitorEvent). Revisit if the business wants a different window.
+  cron.schedule('30 2 * * *', async () => {
+    await forEachOrganization(async () => {
+      const cutoff = new Date(Date.now() - (90 * 24 * 60 * 60 * 1000));
+      await visitorEventModel.destroy({ where: { visitedAt: { [Op.lte]: cutoff } } });
     });
   });
 
@@ -729,6 +758,7 @@ async function setup() {
 
   // Notification function for ticket events
   const notify = async (ticket, type) => {
+    if (!ticket.assigneeId) return;
     const assignee = await userModel.findOne({ where: { scjId: ticket.assigneeId } });
     if (!assignee) return;
     const text = `Ticket ${type}:\n${ticketText(ticket)}`;
@@ -743,6 +773,47 @@ async function setup() {
       );
     }
   };
+
+  // A staff member logging in from a city/country CommandCentre hasn't seen
+  // them log in from before could be legitimate travel, or a stolen
+  // credential. Compared by city (via the same ip-api geo lookup already
+  // used for presence tracking), not raw IP — a home ISP reassigning a
+  // dynamic IP within the same city would otherwise false-alarm on every
+  // login. The very first login ever just establishes the baseline rather
+  // than alerting (nothing to compare against yet); "Local / Private"
+  // (internal network) is never flagged. Runs inside the /token route's
+  // own runAsPlatformAdmin context, so organizationId must be set explicitly
+  // on the AuditLog row (platform-admin context never auto-stamps it).
+  async function flagUnfamiliarLogin(user, ip) {
+    const geo = await getGeoForIp(ip).catch(() => null);
+    const known = Array.isArray(user.knownLoginGeos) ? user.knownLoginGeos : [];
+    const { isUnfamiliar, updatedKnownGeos } = evaluateLoginGeo(known, geo);
+
+    if (updatedKnownGeos !== known) {
+      await user.update({ knownLoginGeos: updatedKnownGeos }).catch(() => {});
+    }
+    if (!isUnfamiliar) return;
+
+    const displayName = `${user.name || ''} ${user.surname || ''}`.trim() || user.name || user.username || `user #${user.id}`;
+    const text = `⚠️ Unfamiliar login location\n\nStaff member: ${displayName}\nRole: ${user.role || 'unknown'}\nLogged in from: ${geo} (IP: ${ip || 'unknown'})\nPreviously seen from: ${known.join(', ') || 'nowhere on record'}\n\nIf this wasn't them, revoke their session and reset their password immediately.`;
+
+    const managers = await getTicketManagers();
+    for (const manager of managers) {
+      if (manager.id === user.id) continue; // the user themselves isn't the audience for their own anomaly alert
+      await sendTelegramToUser(manager, text).catch(() => {});
+    }
+
+    await auditLogModel.create({
+      organizationId: user.organizationId,
+      entityType: 'user',
+      entityId: String(user.id),
+      actor: displayName,
+      actorRole: user.role || null,
+      action: 'user.unfamiliar_login_location',
+      ipAddress: ip || null,
+      details: JSON.stringify({ geo, previouslyKnown: known }),
+    }).catch(() => {});
+  }
 
   const sendAssignmentGuidance = async (ticket) => {
     if (!ticket.assigneeId) return;
@@ -1247,10 +1318,14 @@ async function setup() {
         Ticket: ticketModel,
         User: userModel,
         TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
         TicketResolutionReport: ticketResolutionReportModel,
         TicketComment: ticketCommentModel,
         TicketActionItem: ticketActionItemModel,
         AuditLog: auditLogModel,
+        ApplicationAsset: applicationAssetModel,
+        NetworkDevice: networkDeviceModel,
+        DatabaseAsset: databaseAssetModel,
       },
       {
         notifyTicket: notify,
@@ -1268,7 +1343,10 @@ async function setup() {
         SecurityFinding: securityFindingModel,
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
         ConnectorReceipt: connectorReceiptModel,
+        ConnectorDeadLetter: connectorDeadLetterModel,
+        Organization: organizationModel,
       },
       notifyTicket: notify,
       defaultOrganizationId: defaultOrganization.id,
@@ -1295,6 +1373,8 @@ async function setup() {
         // most. Never actually exercised before the sentinel route existed.
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
+        VisitorEvent: visitorEventModel,
       },
       authMiddleware,
       notifyTicket: notify,
@@ -1321,6 +1401,7 @@ async function setup() {
         SecurityFinding: securityFindingModel,
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
         User: userModel,
         ConnectorDeadLetter: connectorDeadLetterModel,
         AuditLog: auditLogModel,
@@ -1328,6 +1409,7 @@ async function setup() {
         DatabaseAsset: databaseAssetModel,
         PatchTask: patchTaskModel,
         ScanRunRecord: scanRunRecordModel,
+        VisitorEvent: visitorEventModel,
       },
       runSweep: runSecuritySweep,
       getSummary: healthSummary,
@@ -1429,6 +1511,7 @@ async function setup() {
         SecurityFinding: securityFindingModel,
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
         ConnectorDeadLetter: connectorDeadLetterModel,
         AuditLog: auditLogModel,
         ScanRunRecord: scanRunRecordModel,
@@ -1446,11 +1529,38 @@ async function setup() {
         SecurityFinding: securityFindingModel,
         Ticket: ticketModel,
         TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
         AuditLog: auditLogModel,
         ScanRunRecord: scanRunRecordModel,
+        // Needed so a real Trivy fix-available CVE can turn straight into a
+        // PatchTask (see autoCreatePatchTaskFromTrivyFinding in
+        // securityEngine.js) instead of that data dead-ending as
+        // descriptive text on the SecurityFinding.
+        PatchTask: patchTaskModel,
       },
       notifyTicket: notify,
     }));
+  });
+
+  // Real liveness sweep — every registered application, network device, and
+  // database gets an actual reachability probe every 5 minutes. A finding
+  // (and therefore an immediate Telegram/email alert to every admin/TJN/GJN
+  // staff member, via SecurityFinding's existing afterCreate hook) fires the
+  // moment something stops responding, and is marked remediated the moment
+  // it responds again.
+  cron.schedule('*/5 * * * *', async () => {
+    await forEachOrganization(() => runDowntimeSweep({
+      models: {
+        ApplicationAsset: applicationAssetModel,
+        NetworkDevice: networkDeviceModel,
+        DatabaseAsset: databaseAssetModel,
+        SecurityFinding: securityFindingModel,
+        Ticket: ticketModel,
+        TicketHistory: ticketHistoryModel,
+        TicketAsset: ticketAssetModel,
+      },
+      notifyTicket: notify,
+    }).catch((err) => logger.error({ err }, 'Downtime sweep failed')));
   });
 
   if (CONFIG.AUTOMATION_NETWORK_ENABLED) {
@@ -1488,6 +1598,7 @@ async function setup() {
     sendEmailNotification,
     runAsPlatformAdmin,
     defaultOrganizationId: defaultOrganization.id,
+    flagUnfamiliarLogin,
   }));
 
   // Get current user info endpoint

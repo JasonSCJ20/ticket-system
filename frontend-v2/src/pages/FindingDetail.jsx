@@ -19,7 +19,7 @@ function btnStyle(color, outline = false) {
   };
 }
 
-export default function FindingDetail({ finding, onClose, onChanged }) {
+export default function FindingDetail({ finding, onClose, onChanged, readOnly = false }) {
   const brief = useApi(() => fetchFindingBrief(finding.id), [finding.id]);
   const [busy, setBusy] = useState(false);
   const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
@@ -68,6 +68,8 @@ export default function FindingDetail({ finding, onClose, onChanged }) {
     }
   };
 
+  // fetchFindingBrief(id) returns { ..., structured: { communication: { businessImpact, remediationRecommendation, executiveSummary } }, ... }
+  // (see node-backend/src/services/findingIntelligence.js:enrichFindingRecord)
   const narrative = brief.data?.structured?.communication || {};
 
   return (
@@ -87,53 +89,75 @@ export default function FindingDetail({ finding, onClose, onChanged }) {
         <Badge tone={finding.status === 'remediated' ? 'ok' : finding.status === 'dismissed' ? 'low' : 'high'}>{finding.status}</Badge>
       </div>
 
-      <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 10px' }}>{finding.description}</p>
+      <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 12px' }}>{finding.description}</p>
 
-      {!brief.loading && !brief.error && (
-        <div style={{ fontSize: 11.5, marginBottom: 12 }}>
-          {narrative.businessImpact && <p><strong>Business impact:</strong> {narrative.businessImpact}</p>}
-          {narrative.remediationRecommendation && <p><strong>Recommended action:</strong> {narrative.remediationRecommendation}</p>}
+      {!brief.loading && !brief.error && (narrative.businessImpact || narrative.remediationRecommendation) && (
+        <div style={{ fontSize: 13, marginBottom: 14 }}>
+          {narrative.businessImpact && (
+            <div style={{ marginBottom: 10 }}>
+              <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, color: 'var(--text-muted)', margin: '0 0 4px' }}>
+                Why it matters
+              </p>
+              <p style={{ margin: 0 }}>{narrative.businessImpact}</p>
+            </div>
+          )}
+          {narrative.remediationRecommendation && (
+            <div>
+              <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.3, color: 'var(--text-muted)', margin: '0 0 4px' }}>
+                Recommended action
+              </p>
+              <p style={{ margin: 0 }}>{narrative.remediationRecommendation}</p>
+            </div>
+          )}
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12 }}>
-        <div>Source: {finding.sourceTool} ({finding.detectionMode})</div>
-        <div>Category: {finding.category}</div>
-        {finding.application && <div>Application: {finding.application.name}</div>}
-        <div>First seen: {new Date(finding.firstSeenAt).toLocaleString()}</div>
-        <div>Last seen: {new Date(finding.lastSeenAt).toLocaleString()}</div>
-        {finding.ticketId && <div>Linked ticket: CC-{finding.ticketId}</div>}
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-        {!finding.manualConfirmed && (
-          <button disabled={busy} onClick={handleConfirm} style={btnStyle('var(--accent)')}>
-            Confirm finding
-          </button>
-        )}
-        {!finding.ticketId && (
-          <button disabled={busy} onClick={handleCreateTicket} style={btnStyle('var(--accent)')}>
-            Create ticket
-          </button>
-        )}
-      </div>
-
-      <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-        <p style={{ fontSize: 11, fontWeight: 700, margin: '0 0 8px' }}>Change status</p>
-        <input
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="Reason (optional, audited)"
-          style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 12, marginBottom: 8 }}
-        />
-        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {STATUSES.filter((s) => s !== finding.status).map((s) => (
-            <button key={s} disabled={busy} onClick={() => handleStatus(s)} style={btnStyle('var(--accent)', true)}>
-              {s}
+      {!readOnly && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+          {!finding.manualConfirmed && (
+            <button disabled={busy} onClick={handleConfirm} style={btnStyle('var(--accent)')}>
+              Confirm finding
             </button>
-          ))}
+          )}
+          {!finding.ticketId && (
+            <button disabled={busy} onClick={handleCreateTicket} style={btnStyle('var(--accent)')}>
+              Create ticket
+            </button>
+          )}
         </div>
-      </div>
+      )}
+
+      <details style={{ marginBottom: 12 }}>
+        <summary style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-muted)', cursor: 'pointer' }}>Technical details</summary>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 10 }}>
+          <div>Source: {finding.sourceTool} ({finding.detectionMode})</div>
+          <div>Category: {finding.category}</div>
+          {finding.application && <div>Application: {finding.application.name}</div>}
+          <div>Risk score: {finding.riskScore}</div>
+          <div>First seen: {new Date(finding.firstSeenAt).toLocaleString()}</div>
+          <div>Last seen: {new Date(finding.lastSeenAt).toLocaleString()}</div>
+          {finding.ticketId && <div>Linked ticket: CC-{finding.ticketId}</div>}
+        </div>
+      </details>
+
+      {!readOnly && (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+          <p style={{ fontSize: 11, fontWeight: 700, margin: '0 0 8px' }}>Change status</p>
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Reason (optional, audited)"
+            style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 12, marginBottom: 8 }}
+          />
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {STATUSES.filter((s) => s !== finding.status).map((s) => (
+              <button key={s} disabled={busy} onClick={() => handleStatus(s)} style={btnStyle('var(--accent)', true)}>
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

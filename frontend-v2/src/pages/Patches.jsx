@@ -2,11 +2,12 @@ import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { fetchPatches, createPatch, updatePatchStatus } from '../api/security.js';
-import { Card, KpiRow, Kpi, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
+import { Card, ErrorState, FeedbackBanner, StatCard, StatCardRow, StatusDot, Chip } from '../components/ui.jsx';
 
 const STATUS_OPTIONS = ['todo', 'in_progress', 'completed'];
 const SEVERITY_OPTIONS = ['low', 'medium', 'high', 'critical'];
 const ASSET_TYPE_OPTIONS = ['application', 'network_device', 'database_asset'];
+const SEVERITY_TONE = { critical: 'danger', high: 'danger', medium: 'warning', low: 'muted' };
 
 const inputStyle = {
   padding: '6px 8px',
@@ -16,6 +17,18 @@ const inputStyle = {
   color: 'var(--text)',
   fontSize: 12,
 };
+
+// Plain-language due-date phrasing for the list row subtitle, matching how
+// the rest of the redesigned tabs (Tickets' SLA label, Findings' timeAgo)
+// avoid raw dates in favor of "how urgent is this right now."
+function dueLabel(dueDate, status) {
+  if (!dueDate) return 'no due date';
+  const diffDays = Math.round((new Date(dueDate).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  if (status !== 'completed' && diffDays < 0) return `overdue by ${Math.abs(diffDays)}d`;
+  if (diffDays === 0) return 'due today';
+  if (diffDays > 0) return `due in ${diffDays}d`;
+  return `was due ${Math.abs(diffDays)}d ago`;
+}
 
 export default function Patches() {
   const { data, loading, error, reload } = useApi(fetchPatches, []);
@@ -66,17 +79,21 @@ export default function Patches() {
   if (loading) return <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>Loading patch tasks…</p>;
 
   const { summary, items } = data;
+  // The /security/patches summary doesn't currently break out autoDetected
+  // counts server-side, so compute it from the loaded items — but prefer a
+  // server-provided count transparently if one is ever added.
+  const foundAutomatically = summary?.autoDetectedCount ?? items.filter((p) => p.autoDetected === true).length;
 
   return (
     <div>
       <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
-      <KpiRow>
-        <Kpi label="Total tasks" value={summary.total} />
-        <Kpi label="Overdue" value={summary.overdue} deltaColor={summary.overdue > 0 ? 'var(--danger)' : undefined} />
-        <Kpi label="Completion rate" value={`${Math.round(summary.completionRate * 100)}%`} />
-        <Kpi label="Completed" value={summary.byStatus?.completed || 0} />
-      </KpiRow>
+      <StatCardRow>
+        <StatCard label="Open tasks" value={summary.total} />
+        <StatCard label="Overdue" value={summary.overdue} tone={summary.overdue > 0 ? 'danger' : undefined} />
+        <StatCard label="Found automatically" value={foundAutomatically} />
+        <StatCard label="Completion rate" value={`${Math.round(summary.completionRate * 100)}%`} />
+      </StatCardRow>
 
       <Card
         title={`Patch tasks (${items.length})`}
@@ -109,39 +126,39 @@ export default function Patches() {
         {items.length === 0 ? (
           <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>No patch tasks yet.</p>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Severity</th>
-                <th style={thStyle}>Title</th>
-                <th style={thStyle}>Asset</th>
-                <th style={thStyle}>Due</th>
-                <th style={thStyle}>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((p) => (
-                <tr key={p.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={tdStyle}><Badge tone={p.severity}>{p.severity}</Badge></td>
-                  <td style={tdStyle}>{p.title}</td>
-                  <td style={tdStyle}>{p.assetName || `${p.assetType} #${p.assetId}`}</td>
-                  <td style={{ ...tdStyle, color: p.dueDate && new Date(p.dueDate) < new Date() && p.status !== 'completed' ? 'var(--danger)' : 'var(--text-muted)' }}>
-                    {p.dueDate ? new Date(p.dueDate).toLocaleDateString() : '—'}
-                  </td>
-                  <td style={tdStyle}>
-                    <select disabled={busy} value={p.status} onChange={(e) => handleStatusChange(p.id, e.target.value)} style={{ ...inputStyle, padding: '4px 6px', fontSize: 11.5 }}>
-                      {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {items.map((p, i) => {
+              const overdue = p.dueDate && new Date(p.dueDate) < new Date() && p.status !== 'completed';
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 12,
+                    padding: '10px 4px',
+                    borderTop: i === 0 ? 'none' : '1px solid var(--border)',
+                  }}
+                >
+                  <StatusDot tone={SEVERITY_TONE[p.severity] || 'muted'} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <p style={{ fontSize: 14, margin: 0 }}>{p.title}</p>
+                      <Chip tone={p.autoDetected ? 'accent' : 'muted'}>{p.autoDetected ? 'Found by scan' : 'Added manually'}</Chip>
+                    </div>
+                    <p style={{ fontSize: 12, color: overdue ? 'var(--danger)' : 'var(--text-muted)', margin: '4px 0 0' }}>
+                      {p.assetName || `${p.assetType} #${p.assetId}`} · {dueLabel(p.dueDate, p.status)}
+                    </p>
+                  </div>
+                  <select disabled={busy} value={p.status} onChange={(e) => handleStatusChange(p.id, e.target.value)} style={{ ...inputStyle, padding: '4px 6px', fontSize: 11.5 }}>
+                    {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </div>
+              );
+            })}
+          </div>
         )}
       </Card>
     </div>
   );
 }
-
-const thStyle = { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 600, fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.3, padding: '6px 8px', borderBottom: '1px solid var(--border)' };
-const tdStyle = { padding: '8px 8px' };

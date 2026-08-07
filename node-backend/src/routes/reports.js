@@ -13,7 +13,7 @@ export default function reportsRouteFactory({
   const router = express.Router();
   const limiter = protectedApiLimiter || ((_req, _res, next) => next());
 
-  router.get('/monthly', authMiddleware, limiter, async (_req, res) => {
+  router.get('/monthly', authMiddleware, limiter, roleMiddleware('analyst'), async (_req, res) => {
     const report = await monthlySummary(new Date(), models.Ticket);
     res.json(report);
   });
@@ -75,7 +75,7 @@ export default function reportsRouteFactory({
     res.json(snapshots.map((s) => ({ generatedAt: s.generatedAt, payload: s.payload })));
   });
 
-  router.get('/technical', authMiddleware, limiter, async (_req, res) => {
+  router.get('/technical', authMiddleware, limiter, roleMiddleware('analyst'), async (_req, res) => {
     const report = await technicalReport({
       Ticket: models.Ticket,
       SecurityFinding: models.SecurityFinding,

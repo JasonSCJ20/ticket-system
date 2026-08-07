@@ -3,7 +3,7 @@ import { useAuth } from '../auth/AuthContext.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { updateProfile, fetchMfaSetup, enableMfa, disableMfa } from '../api/auth.js';
 import { setToken } from '../api/client.js';
-import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
+import { Card, Chip, FeedbackBanner } from '../components/ui.jsx';
 
 const AUDIENCE_OPTIONS = [
   { value: 'STAFF', label: 'Operational staff' },
@@ -16,24 +16,26 @@ const TEAM_OPTIONS = ['Network', 'Developer', 'Hardware'];
 
 const inputStyle = {
   width: '100%',
-  padding: '6px 8px',
+  padding: '7px 10px',
   borderRadius: 6,
   border: '1px solid var(--border)',
   background: 'var(--surface-2)',
   color: 'var(--text)',
-  fontSize: 12,
-  marginBottom: 8,
+  fontSize: 13,
+  marginBottom: 10,
 };
 
-function btnStyle(color, outline = false) {
+// Plain bordered buttons match the rest of the redesigned app — only a
+// genuinely primary action (save, confirm) gets a filled background.
+function btnStyle(color, outline = true) {
   return {
-    padding: '6px 12px',
+    padding: '7px 14px',
     borderRadius: 6,
     border: `1px solid ${color}`,
     background: outline ? 'transparent' : color,
     color: outline ? color : 'var(--bg)',
-    fontSize: 11.5,
-    fontWeight: 600,
+    fontSize: 13,
+    fontWeight: 500,
     cursor: 'pointer',
   };
 }
@@ -131,8 +133,8 @@ export default function Settings() {
     <div>
       <FeedbackBanner feedback={feedback} onDismiss={clear} />
 
-      <Card title="Profile">
-        <p style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 0 }}>
+      <Card title="Profile" style={{ padding: '1.25rem' }}>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0, marginBottom: 12 }}>
           {profile?.name} {profile?.surname} · {profile?.email}
         </p>
         <select value={form.audienceCode} onChange={(e) => setForm({ ...form, audienceCode: e.target.value })} style={inputStyle}>
@@ -141,7 +143,7 @@ export default function Settings() {
 
         {isStaff && (
           <>
-            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
               {TEAM_OPTIONS.map((team) => (
                 <button
                   key={team}
@@ -157,29 +159,29 @@ export default function Settings() {
           </>
         )}
 
-        <button disabled={busy} onClick={handleSaveProfile} style={btnStyle('var(--accent)')}>
+        <button disabled={busy} onClick={handleSaveProfile} style={btnStyle('var(--accent)', false)}>
           Save profile
         </button>
       </Card>
 
-      <Card title="Two-factor authentication" right={<Badge tone={profile?.mfaEnabled ? 'ok' : 'low'}>{profile?.mfaEnabled ? 'enabled' : 'disabled'}</Badge>}>
+      <Card title="Two-factor authentication" right={<Chip tone={profile?.mfaEnabled ? 'accent' : 'muted'}>{profile?.mfaEnabled ? 'enabled' : 'disabled'}</Chip>} style={{ padding: '1.25rem' }}>
         {profile?.mfaEnabled ? (
-          <button disabled={busy} onClick={handleDisableMfa} style={btnStyle('var(--danger)', true)}>
+          <button disabled={busy} onClick={handleDisableMfa} style={btnStyle('var(--danger)')}>
             Disable MFA
           </button>
         ) : mfaSetup ? (
           <div>
-            <p style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>Scan this into your authenticator app, or enter the secret manually:</p>
-            <code style={{ display: 'block', fontSize: 11, wordBreak: 'break-all', background: 'var(--surface-2)', padding: 8, borderRadius: 6, marginBottom: 8 }}>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>Scan this into your authenticator app, or enter the secret manually:</p>
+            <code style={{ display: 'block', fontSize: 12.5, wordBreak: 'break-all', background: 'var(--surface-2)', padding: 10, borderRadius: 6, marginBottom: 10 }}>
               {mfaSetup.secret}
             </code>
             <input value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} placeholder="6-digit code" style={inputStyle} />
-            <button disabled={busy} onClick={handleEnableMfa} style={btnStyle('var(--success)')}>
+            <button disabled={busy} onClick={handleEnableMfa} style={btnStyle('var(--success)', false)}>
               Confirm and enable
             </button>
           </div>
         ) : (
-          <button disabled={busy} onClick={handleStartMfaSetup} style={btnStyle('var(--accent)')}>
+          <button disabled={busy} onClick={handleStartMfaSetup} style={btnStyle('var(--accent)', false)}>
             Set up MFA
           </button>
         )}

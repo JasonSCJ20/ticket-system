@@ -5,14 +5,15 @@ import { Op } from 'sequelize';
 import { body, validationResult } from 'express-validator';
 import { CONFIG } from '../config.js';
 import { ingestFinding } from '../services/securityEngine.js';
-import { runWithOrganization } from '../services/tenantContext.js';
+import { runWithOrganization, runAsPlatformAdmin } from '../services/tenantContext.js';
+import { decryptAssetCredential } from '../services/assetSecrets.js';
 
 const router = express.Router();
 
-function hasValidConnectorSecret(secretHeader) {
-  if (!CONFIG.CONNECTOR_SHARED_SECRET) return false;
+function hasValidConnectorSecret(secretHeader, expectedSecret) {
+  if (!expectedSecret) return false;
   const received = Buffer.from(String(secretHeader || ''), 'utf8');
-  const expected = Buffer.from(CONFIG.CONNECTOR_SHARED_SECRET, 'utf8');
+  const expected = Buffer.from(expectedSecret, 'utf8');
   if (received.length !== expected.length) return false;
   return crypto.timingSafeEqual(received, expected);
 }
@@ -29,10 +30,10 @@ function parseAllowedIps() {
     .filter(Boolean);
 }
 
-function hasValidConnectorSignature(req) {
+function hasValidConnectorSignature(req, expectedSecret) {
   const timestamp = req.header('x-connector-timestamp');
   const signature = req.header('x-connector-signature');
-  if (!timestamp || !signature || !CONFIG.CONNECTOR_SHARED_SECRET) return false;
+  if (!timestamp || !signature || !expectedSecret) return false;
 
   const tsNum = Number(timestamp);
   if (Number.isNaN(tsNum)) return false;
@@ -42,7 +43,7 @@ function hasValidConnectorSignature(req) {
 
   const body = req.rawBody || JSON.stringify(req.body || {});
   const message = `${timestamp}.${body}`;
-  const expected = crypto.createHmac('sha256', CONFIG.CONNECTOR_SHARED_SECRET).update(message).digest('hex');
+  const expected = crypto.createHmac('sha256', expectedSecret).update(message).digest('hex');
 
   const received = Buffer.from(String(signature), 'utf8');
   const expectedBuf = Buffer.from(expected, 'utf8');
@@ -50,26 +51,49 @@ function hasValidConnectorSignature(req) {
   return crypto.timingSafeEqual(received, expectedBuf);
 }
 
-function connectorAuth(req, res, next) {
-  const secret = req.header('x-connector-secret');
-  const validSecret = hasValidConnectorSecret(secret);
-  const validSignature = hasValidConnectorSignature(req);
-  if (CONFIG.CONNECTOR_ENFORCE_SIGNATURE && !validSignature) {
-    return res.status(401).json({ error: 'Invalid connector signature' });
-  }
-  if (!CONFIG.CONNECTOR_ENFORCE_SIGNATURE && !validSecret && !validSignature) {
-    return res.status(401).json({ error: 'Invalid connector secret' });
-  }
-
-  const allowedIps = parseAllowedIps();
-  if (allowedIps.length > 0) {
-    const incomingIp = normalizeIp(req.ip);
-    if (!allowedIps.includes(incomingIp)) {
-      return res.status(403).json({ error: 'Connector source IP not allowed' });
+// Resolves which organization's secret to check a request against. A
+// connector identifies its tenant with an `x-connector-org` header carrying
+// the organization's slug; when absent (every connector configured before
+// this existed), it falls back to the single global
+// CONFIG.CONNECTOR_SHARED_SECRET attributed to the default organization —
+// so existing Wazuh/Suricata/Prometheus configs keep working with zero
+// changes required on their end.
+async function resolveConnectorSecret(req, { Organization, defaultOrganizationId }) {
+  const orgSlug = req.header('x-connector-org');
+  if (orgSlug) {
+    const org = await runAsPlatformAdmin(() => Organization.findOne({ where: { slug: orgSlug } }));
+    if (org?.connectorSecret) {
+      return { secret: decryptAssetCredential(org.connectorSecret), organizationId: org.id };
     }
   }
+  return { secret: CONFIG.CONNECTOR_SHARED_SECRET, organizationId: defaultOrganizationId };
+}
 
-  return next();
+function makeConnectorAuth({ Organization, defaultOrganizationId }) {
+  return async function connectorAuth(req, res, next) {
+    const { secret: expectedSecret, organizationId } = await resolveConnectorSecret(req, { Organization, defaultOrganizationId });
+
+    const secretHeader = req.header('x-connector-secret');
+    const validSecret = hasValidConnectorSecret(secretHeader, expectedSecret);
+    const validSignature = hasValidConnectorSignature(req, expectedSecret);
+    if (CONFIG.CONNECTOR_ENFORCE_SIGNATURE && !validSignature) {
+      return res.status(401).json({ error: 'Invalid connector signature' });
+    }
+    if (!CONFIG.CONNECTOR_ENFORCE_SIGNATURE && !validSecret && !validSignature) {
+      return res.status(401).json({ error: 'Invalid connector secret' });
+    }
+
+    const allowedIps = parseAllowedIps();
+    if (allowedIps.length > 0) {
+      const incomingIp = normalizeIp(req.ip);
+      if (!allowedIps.includes(incomingIp)) {
+        return res.status(403).json({ error: 'Connector source IP not allowed' });
+      }
+    }
+
+    req.connectorOrganizationId = organizationId;
+    return next();
+  };
 }
 
 function requestDedupeKey(req) {
@@ -97,16 +121,16 @@ function mapPrometheusSeverity(raw) {
 }
 
 export default ({ models, notifyTicket, defaultOrganizationId }) => {
-  const { ConnectorDeadLetter, ConnectorReceipt } = models;
+  const { ConnectorDeadLetter, ConnectorReceipt, Organization } = models;
 
-  // Connectors authenticate with one shared secret, not a per-tenant
-  // credential — there is no organization identity to derive from the
-  // request at all yet. Every inbound connector event is attributed to the
-  // one default organization for now. Real per-tenant connector secrets
-  // (so a second customer's own Wazuh/Suricata feed doesn't land in the
-  // first customer's data) are a follow-up, not built in this phase.
+  const connectorAuth = makeConnectorAuth({ Organization, defaultOrganizationId });
+
+  // connectorAuth (above) already resolved which real organization this
+  // request's secret/signature actually belongs to and stashed it on
+  // req.connectorOrganizationId — falls back to the default org only when
+  // no per-tenant secret was configured/matched.
   function withConnectorOrganization(req, res, next) {
-    runWithOrganization(defaultOrganizationId, next);
+    runWithOrganization(req.connectorOrganizationId || defaultOrganizationId, next);
   }
   const MAX_BATCH = 500;
 

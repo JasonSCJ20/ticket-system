@@ -7,6 +7,7 @@ import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantC
 
 let token;
 let defaultOrgId;
+let testAssetId;
 
 beforeAll(async () => {
   // Wait for DB init and route mounting
@@ -33,6 +34,15 @@ beforeAll(async () => {
       department: 'Networks',
     });
   });
+
+  // A ticket must always name a real registered asset — shared fixture
+  // referenced by every "create a ticket" test below.
+  const testAsset = await runWithOrganization(defaultOrgId, () => sequelize.models.ApplicationAsset.create({
+    name: `Test asset for tickets ${Date.now()}`,
+    baseUrl: 'https://example.test',
+    environment: 'production',
+  }));
+  testAssetId = testAsset.id;
 
   // Login to get a real token
   const res = await request(app)
@@ -176,10 +186,62 @@ describe('Tickets', () => {
         description: 'This is a test ticket body',
         priority: 'high',
         assigneeId: '00361031-09999',
+        assetLinks: [{ assetType: 'application', assetId: testAssetId }],
       });
     expect(res.status).toBe(201);
     expect(res.body.title).toBe('Test Ticket');
     expect(res.body.assigneeId).toBe('00361031-09999');
+  });
+
+  it('rejects a ticket with no asset link', async () => {
+    const res = await request(app)
+      .post('/api/tickets')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'No Asset Ticket',
+        description: 'This ticket omits assetLinks entirely',
+        priority: 'high',
+      });
+    expect(res.status).toBe(422);
+  });
+
+  it('rejects a ticket that links a nonexistent asset', async () => {
+    const res = await request(app)
+      .post('/api/tickets')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'Fake Asset Ticket',
+        description: 'This ticket links an asset id that does not exist',
+        priority: 'high',
+        assetLinks: [{ assetType: 'application', assetId: 999999 }],
+      });
+    expect(res.status).toBe(422);
+  });
+
+  it('persists root cause, actions taken, and preventive actions on update', async () => {
+    const created = await request(app)
+      .post('/api/tickets')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'WHY HOW Ticket',
+        description: 'Ticket for verifying WHY/HOW fields persist',
+        priority: 'medium',
+        assetLinks: [{ assetType: 'application', assetId: testAssetId }],
+      });
+    expect(created.status).toBe(201);
+
+    const patched = await request(app)
+      .patch(`/api/tickets/${created.body.id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rootCause: 'An outdated dependency introduced the vulnerability.',
+        actionsTaken: 'Applied the vendor patch and redeployed.',
+        preventiveActions: 'Enabled automatic dependency update checks.',
+      });
+    expect(patched.status).toBe(200);
+    expect(patched.body.rootCause).toBe('An outdated dependency introduced the vulnerability.');
+    expect(patched.body.actionsTaken).toBe('Applied the vendor patch and redeployed.');
+    expect(patched.body.preventiveActions).toBe('Enabled automatic dependency update checks.');
   });
 
   it('lists tickets', async () => {
@@ -199,6 +261,7 @@ describe('Tickets', () => {
         description: 'Incident lifecycle transition validation ticket',
         priority: 'critical',
         assigneeId: '00361031-09999',
+        assetLinks: [{ assetType: 'application', assetId: testAssetId }],
       });
     expect(created.status).toBe(201);
 
@@ -458,6 +521,7 @@ describe('Reports, Governance, and Assistant', () => {
         description: 'Validate one-click ticket tending workflow',
         priority: 'high',
         assigneeId: '00361031-09999',
+        assetLinks: [{ assetType: 'application', assetId: testAssetId }],
       });
     expect(created.status).toBe(201);
 
@@ -495,6 +559,7 @@ describe('Reports, Governance, and Assistant', () => {
       .send({
         findingId: finding.id,
         assigneeId: '00361031-09999',
+        assetLinks: [{ assetType: 'application', assetId: testAssetId }],
       });
 
     expect(tended.status).toBe(200);

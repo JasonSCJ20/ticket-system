@@ -83,6 +83,13 @@ export default (models) => {
     return res.status(403).json({ error: 'Insufficient permissions' });
   };
 
+  // The team roster is internal staff data — an asset owner has no
+  // legitimate reason to see it, so this whole router is analyst/admin only.
+  router.use((req, res, next) => {
+    if (req.user?.role === 'admin' || req.user?.role === 'analyst') return next();
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  });
+
   // GET /api/users - List all users
   router.get('/', async (req, res) => {
     // Fetch all users from database

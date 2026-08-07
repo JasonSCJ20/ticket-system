@@ -1,5 +1,6 @@
 import express from 'express';
 import crypto from 'crypto';
+import { Op } from 'sequelize';
 import { param, body, validationResult } from 'express-validator';
 import { generateAgentKey, hashAgentKey, verifyAgentKey, encryptAssetCredential, decryptAssetCredential } from '../services/assetSecrets.js';
 import { ingestFinding } from '../services/securityEngine.js';
@@ -23,7 +24,7 @@ function pruneCanaries() {
 }
 
 export default ({ models, authMiddleware, notifyTicket }) => {
-  const { ApplicationAsset, AuditLog, AgentCommand, SecurityFinding, Ticket, TicketHistory } = models;
+  const { ApplicationAsset, AuditLog, AgentCommand, SecurityFinding, Ticket, TicketHistory, TicketAsset, VisitorEvent } = models;
 
   const adminOnly = (req, res, next) => {
     if (req.user?.role === 'admin') return next();
@@ -410,7 +411,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       const { category, severity, title, description, evidence, sourceIp, blocked } = req.body;
 
       const result = await ingestFinding({
-        models: { ApplicationAsset, SecurityFinding, Ticket, TicketHistory },
+        models: { ApplicationAsset, SecurityFinding, Ticket, TicketHistory, TicketAsset },
         notifyTicket,
         sourceTool: 'commandcentre-sentinel',
         detectionMode: 'active',
@@ -458,7 +459,7 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       } = req.body;
 
       const result = await ingestFinding({
-        models: { ApplicationAsset, SecurityFinding, Ticket, TicketHistory },
+        models: { ApplicationAsset, SecurityFinding, Ticket, TicketHistory, TicketAsset },
         notifyTicket,
         sourceTool: 'commandcentre-agent',
         detectionMode: 'active',
@@ -474,6 +475,40 @@ export default ({ models, authMiddleware, notifyTicket }) => {
       });
 
       return res.status(201).json({ acknowledged: true, findingId: result?.finding?.id || null });
+    },
+  );
+
+  // Benign traffic, reported in a batch on the agent's existing heartbeat
+  // cadence (see agent/src/core.js) rather than one HTTP call per real
+  // request — that would double the agent's own network overhead on every
+  // proxied/shielded request. Capped at 200 per call, matching the agent's
+  // own in-memory buffer cap, so a misbehaving/compromised agent can't push
+  // an unbounded payload in one request.
+  router.post(
+    '/:id/visit-report',
+    agentAuth,
+    body('visits').isArray({ min: 1, max: 200 }),
+    body('visits.*.ipAddress').isString().trim().isLength({ min: 1, max: 64 }),
+    body('visits.*.userAgent').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    body('visits.*.path').optional({ nullable: true }).isString().trim().isLength({ max: 512 }),
+    body('visits.*.method').optional({ nullable: true }).isString().trim().isLength({ max: 10 }),
+    body('visits.*.statusCode').optional({ nullable: true }).isInt(),
+    body('visits.*.visitedAt').optional({ nullable: true }).isISO8601(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      await VisitorEvent.bulkCreate(req.body.visits.map((v) => ({
+        applicationAssetId: req.asset.id,
+        ipAddress: v.ipAddress,
+        userAgent: v.userAgent || null,
+        path: v.path || null,
+        method: v.method || null,
+        statusCode: v.statusCode ?? null,
+        visitedAt: v.visitedAt ? new Date(v.visitedAt) : new Date(),
+      })));
+
+      return res.status(201).json({ acknowledged: true, recorded: req.body.visits.length });
     },
   );
 
@@ -505,6 +540,11 @@ export default ({ models, authMiddleware, notifyTicket }) => {
         action: req.body.action,
         target: req.body.target,
         reason: req.body.reason || null,
+        // Bounds how long a stolen/leaked agent key could leverage a queued
+        // command that never gets picked up — 10 minutes is generous for a
+        // real polling agent (default poll interval is 15s) but short
+        // enough to matter if the key is compromised.
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
       });
 
       await AuditLog.create({
@@ -557,8 +597,20 @@ export default ({ models, authMiddleware, notifyTicket }) => {
   );
 
   router.get('/:id/commands/pending', eitherKeyAuth, async (req, res) => {
+    // Lazy cleanup: anything that expired before an agent ever polled for
+    // it is dead, not delivered late — fail it out rather than let a
+    // long-overdue block/unblock surprise-execute on the next poll.
+    await AgentCommand.update(
+      { status: 'failed', failureReason: 'Expired before being picked up.' },
+      { where: { applicationAssetId: req.asset.id, status: 'pending', expiresAt: { [Op.lt]: new Date() } } },
+    );
+
     const commands = await AgentCommand.findAll({
-      where: { applicationAssetId: req.asset.id, status: 'pending' },
+      where: {
+        applicationAssetId: req.asset.id,
+        status: 'pending',
+        [Op.or]: [{ expiresAt: null }, { expiresAt: { [Op.gte]: new Date() } }],
+      },
       order: [['createdAt', 'ASC']],
     });
     return res.json(commands);

@@ -1,8 +1,8 @@
 import { useApi } from '../hooks/useApi.js';
 import { fetchLiveFeed, fetchThreatOrigins, fetchReconDetections, fetchSchedulerState } from '../api/security.js';
-import { Card, KpiRow, Kpi, Badge, ErrorState } from '../components/ui.jsx';
+import { Card, StatCard, StatCardRow, StatusDot, Chip, Badge, ErrorState } from '../components/ui.jsx';
 
-const SEVERITY_TONE = { info: 'low', low: 'low', medium: 'medium', high: 'high', critical: 'critical' };
+const SEVERITY_TONE = { info: 'muted', low: 'muted', medium: 'warning', high: 'warning', critical: 'danger' };
 
 export default function SocFeed() {
   const feed = useApi(fetchLiveFeed, []);
@@ -25,121 +25,104 @@ export default function SocFeed() {
 
   return (
     <div>
-      <KpiRow>
-        <Kpi label="Events (window)" value={feed.data.total} />
-        <Kpi label="Total attacks" value={origins.data.totalAttacks} />
-        <Kpi label="Top origin" value={origins.data.topCountry ? `${originFlag(origins.data, origins.data.topCountry)} ${origins.data.topCountry}` : '—'} />
-        <Kpi label="Active scanners" value={recon.data.scannerCount} />
-      </KpiRow>
+      <StatCardRow>
+        <StatCard label="Events (window)" value={feed.data.total} />
+        <StatCard label="Attacks detected" value={origins.data.totalAttacks} />
+        <StatCard
+          label="Top origin"
+          value={origins.data.topCountry ? `${originFlag(origins.data, origins.data.topCountry)} ${origins.data.topCountry}` : '—'}
+        />
+        <StatCard label="Active scanners" value={recon.data.scannerCount} />
+      </StatCardRow>
 
       <Card title="Live feed" right={<button onClick={reloadAll} style={refreshBtn}>Refresh</button>}>
         <div style={{ maxHeight: 360, overflowY: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Time</th>
-                <th style={thStyle}>Severity</th>
-                <th style={thStyle}>Type</th>
-                <th style={thStyle}>Source</th>
-                <th style={thStyle}>Destination</th>
-                <th style={thStyle}>Message</th>
-              </tr>
-            </thead>
-            <tbody>
-              {feed.data.events.map((e) => (
-                <tr key={e.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={tdStyle}>{new Date(e.timestamp).toLocaleTimeString()}</td>
-                  <td style={tdStyle}>
-                    <Badge tone={SEVERITY_TONE[e.severity] || 'medium'}>{e.severity}</Badge>
-                  </td>
-                  <td style={tdStyle}>{e.type}</td>
-                  <td style={tdStyle}>
-                    {e.srcFlag} {e.srcCountry} · {e.srcIp} {e.srcThreat && e.srcThreat !== 'internal' && <Badge tone="high">{e.srcThreat}</Badge>}
-                  </td>
-                  <td style={tdStyle}>{e.dstAsset} :{e.dstPort}</td>
-                  <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>{e.message}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {feed.data.events.map((e) => (
+            <div
+              key={e.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '8px 4px',
+                borderTop: '1px solid var(--border)',
+                fontSize: 12.5,
+              }}
+            >
+              <span style={{ color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums', width: 68, flexShrink: 0 }}>
+                {new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false })}
+              </span>
+              <StatusDot tone={SEVERITY_TONE[e.severity] || 'warning'} />
+              <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <span style={{ fontWeight: 600 }}>{e.type}</span>
+                <span style={{ color: 'var(--text-muted)' }}> — {e.message}</span>
+              </div>
+              <div style={{ flexShrink: 0, whiteSpace: 'nowrap', color: 'var(--text-muted)' }}>
+                {e.srcFlag} {e.srcCountry} · {e.srcIp}
+                {e.srcThreat && e.srcThreat !== 'internal' && (
+                  <span style={{ marginLeft: 6 }}>
+                    <Badge tone="high">{e.srcThreat}</Badge>
+                  </span>
+                )}
+                <span style={{ margin: '0 6px' }}>→</span>
+                <span style={{ color: 'var(--text)' }}>{e.dstAsset}</span>:{e.dstPort}
+              </div>
+            </div>
+          ))}
         </div>
       </Card>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
         <Card title="Threat origins">
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Origin</th>
-                <th style={thStyle}>Threat</th>
-                <th style={thStyle}>Count</th>
-                <th style={thStyle}>Crit/High</th>
-              </tr>
-            </thead>
-            <tbody>
-              {origins.data.origins.slice(0, 12).map((o) => (
-                <tr key={o.srcIp} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={tdStyle}>{o.flag} {o.city}, {o.country} ({o.org})</td>
-                  <td style={tdStyle}><Badge tone="high">{o.threat}</Badge></td>
-                  <td style={tdStyle}>{o.count}</td>
-                  <td style={tdStyle}>{o.critical}/{o.high}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {origins.data.origins.slice(0, 12).map((o) => (
+            <div
+              key={o.srcIp}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 4px', borderTop: '1px solid var(--border)', fontSize: 12.5 }}
+            >
+              <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {o.flag} {o.city}, {o.country} <span style={{ color: 'var(--text-muted)' }}>({o.org})</span>
+              </div>
+              <Badge tone="high">{o.threat}</Badge>
+              <span style={{ color: 'var(--text-muted)', width: 30, textAlign: 'right' }}>{o.count}</span>
+              <Chip tone="muted">{o.critical}/{o.high} crit/high</Chip>
+            </div>
+          ))}
         </Card>
 
         <Card title="Recon &amp; scanning activity">
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Source</th>
-                <th style={thStyle}>Port scans</th>
-                <th style={thStyle}>Auth fails</th>
-                <th style={thStyle}>Last seen</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recon.data.detections.slice(0, 12).map((d) => (
-                <tr key={d.srcIp} style={{ borderBottom: '1px solid var(--border)' }}>
-                  <td style={tdStyle}>{d.srcFlag} {d.srcIp} ({d.srcOrg})</td>
-                  <td style={tdStyle}>{d.portScans}</td>
-                  <td style={tdStyle}>{d.authFails}</td>
-                  <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>{new Date(d.lastSeen).toLocaleTimeString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {recon.data.detections.slice(0, 12).map((d) => (
+            <div
+              key={d.srcIp}
+              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 4px', borderTop: '1px solid var(--border)', fontSize: 12.5 }}
+            >
+              <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {d.srcFlag} {d.srcIp} <span style={{ color: 'var(--text-muted)' }}>({d.srcOrg})</span>
+              </div>
+              <Chip tone="muted">{d.portScans} scans</Chip>
+              <Chip tone="muted">{d.authFails} auth fails</Chip>
+              <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{new Date(d.lastSeen).toLocaleTimeString()}</span>
+            </div>
+          ))}
         </Card>
       </div>
 
-      <Card title="Detection tooling health">
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11.5 }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Tool</th>
-              <th style={thStyle}>Mode</th>
-              <th style={thStyle}>Runs</th>
-              <th style={thStyle}>Failures</th>
-              <th style={thStyle}>Last success</th>
-            </tr>
-          </thead>
-          <tbody>
-            {scheduler.data.state.map((s) => (
-              <tr key={s.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                <td style={tdStyle}>{s.name} <span style={{ color: 'var(--text-muted)' }}>({s.engine})</span></td>
-                <td style={tdStyle}>
-                  <Badge tone={s.mode === 'active' ? 'ok' : 'medium'}>{s.mode}</Badge>
-                </td>
-                <td style={tdStyle}>{s.totalRuns}</td>
-                <td style={tdStyle}>
-                  <Badge tone={s.failureCount > 0 ? 'high' : 'ok'}>{s.failureCount}</Badge>
-                </td>
-                <td style={{ ...tdStyle, color: 'var(--text-muted)' }}>{s.lastSuccessAt ? new Date(s.lastSuccessAt).toLocaleString() : 'never'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <Card title="Are the detection tools actually working?">
+        {scheduler.data.state.map((s) => {
+          const status = toolStatus(s);
+          return (
+            <div
+              key={s.id}
+              style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 4px', borderTop: '1px solid var(--border)', fontSize: 13 }}
+            >
+              <StatusDot tone={status.tone} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span style={{ fontWeight: 600 }}>{s.name}</span>{' '}
+                <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>({s.engine})</span>
+              </div>
+              <span style={{ color: `var(--${status.color})`, fontWeight: 600, whiteSpace: 'nowrap' }}>{status.text}</span>
+            </div>
+          );
+        })}
       </Card>
     </div>
   );
@@ -150,6 +133,18 @@ function originFlag(data, code) {
   return match?.flag || '';
 }
 
-const thStyle = { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 600, fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.3, padding: '6px 8px', borderBottom: '1px solid var(--border)' };
-const tdStyle = { padding: '7px 8px' };
+function toolStatus(s) {
+  if (s.totalRuns === 0) {
+    return { tone: 'muted', color: 'text-muted', text: 'Not running yet' };
+  }
+  if (s.mode === 'active' && s.failureCount === 0) {
+    const when = s.lastSuccessAt ? new Date(s.lastSuccessAt).toLocaleString() : 'unknown time';
+    return { tone: 'ok', color: 'success', text: `Working · last ran ${when}` };
+  }
+  if (s.failureCount > 0) {
+    return { tone: 'danger', color: 'danger', text: `Needs attention · ${s.failureCount} failure${s.failureCount === 1 ? '' : 's'}` };
+  }
+  return { tone: 'warning', color: 'warning', text: 'Needs attention' };
+}
+
 const refreshBtn = { padding: '5px 10px', borderRadius: 6, border: '1px solid var(--accent)', background: 'transparent', color: 'var(--accent)', fontSize: 11, fontWeight: 600, cursor: 'pointer' };

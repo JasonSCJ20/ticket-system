@@ -9,6 +9,9 @@ let otherOwnerToken;
 let adminToken;
 let myAssetId;
 let otherAssetId;
+let myDeviceId;
+let otherDeviceId;
+let orphanDeviceId;
 
 beforeAll(async () => {
   await ready;
@@ -22,6 +25,7 @@ beforeAll(async () => {
     await sequelize.models.User.destroy({ where: {} });
     await sequelize.models.ApplicationAsset.destroy({ where: {}, cascade: true, force: true });
     await sequelize.models.SecurityFinding.destroy({ where: {}, cascade: true, force: true });
+    await sequelize.models.NetworkDevice.destroy({ where: {}, cascade: true, force: true });
 
     const hash = await bcrypt.hash('password123', 10);
 
@@ -103,6 +107,27 @@ beforeAll(async () => {
       description: 'x',
       requiresManualConfirmation: true,
     });
+
+    const myDevice = await sequelize.models.NetworkDevice.create({
+      organizationId: org.id,
+      name: `device-of-a-${Date.now()}`,
+      deviceType: 'router',
+      applicationAssetId: myAssetId,
+    });
+    myDeviceId = myDevice.id;
+    const otherDevice = await sequelize.models.NetworkDevice.create({
+      organizationId: org.id,
+      name: `device-of-b-${Date.now()}`,
+      deviceType: 'router',
+      applicationAssetId: otherAssetId,
+    });
+    otherDeviceId = otherDevice.id;
+    const orphanDevice = await sequelize.models.NetworkDevice.create({
+      organizationId: org.id,
+      name: `orphan-device-${Date.now()}`,
+      deviceType: 'router',
+    });
+    orphanDeviceId = orphanDevice.id;
   });
 
   const adminLogin = await request(app).post('/api/token').send({ username: 'admin_owner_test', password: 'password123' });
@@ -152,5 +177,99 @@ describe('owner-role asset/finding scoping', () => {
     const titles = findingsRes.body.map((f) => f.title);
     expect(titles).toContain('Finding on asset A');
     expect(titles).toContain('Finding on asset B');
+  });
+
+  it('an owner can fetch the brief for their own finding', async () => {
+    const findingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${ownerToken}`);
+    const mine = findingsRes.body.find((f) => f.title === 'Finding on asset A');
+    const res = await request(app).get(`/api/security/findings/${mine.id}/brief`).set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.status).toBe(200);
+  });
+
+  it('an owner gets 404, not the data, when guessing another owner\'s finding ID', async () => {
+    const adminFindingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${adminToken}`);
+    const notMine = adminFindingsRes.body.find((f) => f.title === 'Finding on asset B');
+    const res = await request(app).get(`/api/security/findings/${notMine.id}/brief`).set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('an owner sees only network devices that belong to their own application, never orphans or other owners\' devices', async () => {
+    const res = await request(app).get('/api/security/network/devices').set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.status).toBe(200);
+    const ids = res.body.map((d) => d.id);
+    expect(ids).toContain(myDeviceId);
+    expect(ids).not.toContain(otherDeviceId);
+    expect(ids).not.toContain(orphanDeviceId);
+  });
+
+  it('admin still sees every network device including orphans', async () => {
+    const res = await request(app).get('/api/security/network/devices').set('Authorization', `Bearer ${adminToken}`);
+    const ids = res.body.map((d) => d.id);
+    expect(ids).toContain(myDeviceId);
+    expect(ids).toContain(otherDeviceId);
+    expect(ids).toContain(orphanDeviceId);
+  });
+});
+
+describe('owner role is blocked from internal-only routes', () => {
+  it('cannot list tickets', async () => {
+    const res = await request(app).get('/api/tickets').set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('cannot list the team roster', async () => {
+    const res = await request(app).get('/api/users').set('Authorization', `Bearer ${ownerToken}`);
+    expect(res.status).toBe(403);
+  });
+
+  it('cannot fetch monthly or technical reports', async () => {
+    const monthly = await request(app).get('/api/reports/monthly').set('Authorization', `Bearer ${ownerToken}`);
+    expect(monthly.status).toBe(403);
+    const technical = await request(app).get('/api/reports/technical').set('Authorization', `Bearer ${ownerToken}`);
+    expect(technical.status).toBe(403);
+  });
+
+  it('cannot read SOC operational telemetry', async () => {
+    const feed = await request(app).get('/api/security/soc/live-feed').set('Authorization', `Bearer ${ownerToken}`);
+    expect(feed.status).toBe(403);
+    const origins = await request(app).get('/api/security/soc/threat-origins').set('Authorization', `Bearer ${ownerToken}`);
+    expect(origins.status).toBe(403);
+  });
+
+  it('cannot list patch tasks or scan run history', async () => {
+    const patches = await request(app).get('/api/security/patches').set('Authorization', `Bearer ${ownerToken}`);
+    expect(patches.status).toBe(403);
+    const scans = await request(app).get('/api/security/scan/runs').set('Authorization', `Bearer ${ownerToken}`);
+    expect(scans.status).toBe(403);
+  });
+
+  it('cannot confirm a finding or create a ticket from one', async () => {
+    const findingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${ownerToken}`);
+    const mine = findingsRes.body.find((f) => f.title === 'Finding on asset A');
+    const confirm = await request(app).post(`/api/security/findings/${mine.id}/confirm`).set('Authorization', `Bearer ${ownerToken}`);
+    expect(confirm.status).toBe(403);
+    const createTicket = await request(app).post(`/api/security/findings/${mine.id}/create-ticket`).set('Authorization', `Bearer ${ownerToken}`);
+    expect(createTicket.status).toBe(403);
+  });
+
+  it('cannot read the remaining internal aggregate/overview routes (Phase 3 sweep)', async () => {
+    const paths = [
+      '/api/security/database/overview',
+      '/api/security/detection/stack',
+      '/api/security/executive-impact',
+      '/api/security/threat-intel/overview',
+      '/api/security/network-visibility/overview',
+    ];
+    for (const path of paths) {
+      const res = await request(app).get(path).set('Authorization', `Bearer ${ownerToken}`);
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it('admin and analyst are unaffected by the new gates', async () => {
+    const ticketsAdmin = await request(app).get('/api/tickets').set('Authorization', `Bearer ${adminToken}`);
+    expect(ticketsAdmin.status).toBe(200);
+    const usersAdmin = await request(app).get('/api/users').set('Authorization', `Bearer ${adminToken}`);
+    expect(usersAdmin.status).toBe(200);
   });
 });

@@ -22,6 +22,19 @@ export function transitionTicket(id, stage, note) {
 }
 
 export const LIFECYCLE_STAGES = ['identified', 'triaged', 'contained', 'eradicated', 'recovered', 'postmortem', 'closed'];
+
+// Plain-language labels for the real lifecycle stages above — the stage
+// values themselves stay the formal incident-response terms the backend
+// already uses, only the display text changes.
+export const LIFECYCLE_LABELS = {
+  identified: 'New',
+  triaged: 'Being assessed',
+  contained: 'Under control',
+  eradicated: 'Fixed',
+  recovered: 'Back to normal',
+  postmortem: 'Reviewed',
+  closed: 'Closed',
+};
 export const STAGE_TO_STATUS = {
   identified: 'open',
   triaged: 'in_progress',

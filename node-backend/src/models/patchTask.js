@@ -31,5 +31,9 @@ export default (sequelize) => {
     notes: { type: DataTypes.TEXT, allowNull: true },
     createdBy: { type: DataTypes.STRING(64), allowNull: true },
     updatedBy: { type: DataTypes.STRING(64), allowNull: true },
+    // True when a scanner (Trivy) created this from a real fix-available CVE
+    // rather than a human typing it in — lets the UI show "Found by scan"
+    // vs "Added manually" instead of guessing from the createdBy string.
+    autoDetected: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   });
 };

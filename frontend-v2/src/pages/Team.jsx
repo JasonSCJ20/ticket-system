@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useApi } from '../hooks/useApi.js';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { fetchUsers, createUser } from '../api/users.js';
-import { Card, Badge, ErrorState, FeedbackBanner } from '../components/ui.jsx';
+import { Card, ErrorState, FeedbackBanner, StatusRow, Chip } from '../components/ui.jsx';
 
 const DEPARTMENT_OPTIONS = ['Networks', 'Dev', 'Hardware'];
 const AUDIENCE_LABELS = { STAFF: 'Operational staff', TJN: 'CommandCentre manager', GJN: 'Operational manager', BJN: 'Executive', DGSN: 'Stakeholder' };
@@ -106,36 +106,32 @@ export default function Team() {
       {users.length === 0 ? (
         <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>No team members yet.</p>
       ) : (
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Name</th>
-              <th style={thStyle}>Department</th>
-              <th style={thStyle}>Role</th>
-              <th style={thStyle}>Audience</th>
-              <th style={thStyle}>Email</th>
-              <th style={thStyle}>Presence</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((u) => (
-              <tr key={u.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                <td style={tdStyle}>{u.name} {u.surname}{u.jobTitle && <span style={{ color: 'var(--text-muted)' }}> · {u.jobTitle}</span>}</td>
-                <td style={tdStyle}>{u.department}</td>
-                <td style={tdStyle}><Badge tone={u.role === 'admin' ? 'medium' : 'low'}>{u.role}</Badge></td>
-                <td style={tdStyle}>{AUDIENCE_LABELS[u.audienceCode] || u.audienceCode || '—'}</td>
-                <td style={tdStyle}>{u.email}</td>
-                <td style={tdStyle}>
-                  <Badge tone={u.isOnline ? 'ok' : 'low'}>{u.isOnline ? 'online' : 'offline'}</Badge>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div>
+          {users.map((u, i) => {
+            const audience = AUDIENCE_LABELS[u.audienceCode] || u.audienceCode || '—';
+            const subtitle = `${u.department} · ${audience}${u.isOnline ? '' : ' · offline'}`;
+            return (
+              <StatusRow
+                key={u.id}
+                tone={u.isOnline ? 'ok' : 'muted'}
+                title={
+                  <span>
+                    {u.name} {u.surname}
+                    {u.role === 'admin' && (
+                      <span style={{ marginLeft: 8 }}>
+                        <Chip>Admin</Chip>
+                      </span>
+                    )}
+                  </span>
+                }
+                subtitle={subtitle}
+                right={<span style={{ color: 'var(--text-muted)' }}>{u.email}</span>}
+                divider={i > 0}
+              />
+            );
+          })}
+        </div>
       )}
     </Card>
   );
 }
-
-const thStyle = { textAlign: 'left', color: 'var(--text-muted)', fontWeight: 600, fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.3, padding: '6px 8px', borderBottom: '1px solid var(--border)' };
-const tdStyle = { padding: '8px 8px' };

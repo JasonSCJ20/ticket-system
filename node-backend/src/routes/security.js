@@ -6,53 +6,11 @@ import { DETECTION_STACK, enrichFindingRecord } from '../services/findingIntelli
 import { recordScanRun } from '../services/scanRunLedger.js';
 import { TOOL_REGISTRY, getToolRegistryEntryByName, getToolSchedulerState } from '../services/toolRegistry.js';
 import { getLiveFeed, getThreatOrigins, getReconDetections } from '../services/socLiveFeed.js';
+import { probeApplicationRuntime } from '../services/livenessProbe.js';
 
 const router = express.Router();
 const SCJ_ID_REGEX = /^\d{8}-\d{5}$/;
 const ANALYTICS_CACHE_TTL_MS = 12000;
-
-async function probeApplicationRuntime(baseUrl) {
-  if (!baseUrl) {
-    return {
-      powerState: 'unknown',
-      runtimeState: 'unknown',
-      runtimeReason: 'No base URL configured',
-      httpStatus: null,
-      checkedAt: new Date().toISOString(),
-    };
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
-
-  try {
-    const response = await fetch(baseUrl, {
-      method: 'GET',
-      signal: controller.signal,
-      redirect: 'follow',
-    });
-
-    const ok = response.status < 500;
-    return {
-      powerState: ok ? 'on' : 'off',
-      runtimeState: ok ? 'running' : 'down',
-      runtimeReason: ok ? 'Application endpoint responded' : `Endpoint returned status ${response.status}`,
-      httpStatus: response.status,
-      checkedAt: new Date().toISOString(),
-    };
-  } catch (err) {
-    const message = String(err?.message || err || 'Unknown runtime probe failure');
-    return {
-      powerState: 'off',
-      runtimeState: 'down',
-      runtimeReason: message.slice(0, 220),
-      httpStatus: null,
-      checkedAt: new Date().toISOString(),
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 
 export default ({ models, runSweep, getSummary, notifyTicket }) => {
   const {
@@ -60,6 +18,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     SecurityFinding,
     Ticket,
     TicketHistory,
+    TicketAsset,
     User,
     ConnectorDeadLetter,
     AuditLog,
@@ -67,6 +26,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     DatabaseAsset,
     PatchTask,
     ScanRunRecord,
+    VisitorEvent,
   } = models;
 
   const validPatchAssetTypes = ['application', 'network_device', 'database_asset'];
@@ -233,8 +193,30 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.status(403).json({ error: 'Insufficient permissions' });
   };
 
-  router.get('/network/devices', async (_req, res) => {
-    const devices = await NetworkDevice.findAll({ order: [['deviceType', 'ASC'], ['name', 'ASC']] });
+  // For internal SOC operational views (live feed, tool scheduler health,
+  // scan run history, patch tasks, finding actions) that have no per-owner
+  // scoping concept — an asset owner reads through the already-scoped
+  // /applications and /findings routes only, never these.
+  const analystOrAdmin = (req, res, next) => {
+    if (req.user?.role === 'admin' || req.user?.role === 'analyst') return next();
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  };
+
+  // A device/database has no direct ownerEmail of its own worth trusting
+  // uniformly (DatabaseAsset has one, NetworkDevice doesn't) — scoping
+  // instead by "belongs to one of my own applications" via the real
+  // applicationAssetId link, so an owner only ever sees child assets under
+  // apps they actually own, never orphaned or other-owner devices/databases.
+  const scopeChildAssetWhereToOwner = async (req, where = {}) => {
+    if (req.user?.role !== 'owner') return where;
+    const user = await User.findByPk(req.user.sub);
+    const myApps = await ApplicationAsset.findAll({ where: { ownerEmail: user?.email || '__no_match__' }, attributes: ['id'] });
+    const myAppIds = myApps.map((a) => a.id);
+    return { ...where, applicationAssetId: { [Op.in]: myAppIds.length ? myAppIds : [-1] } };
+  };
+
+  router.get('/network/devices', async (req, res) => {
+    const devices = await NetworkDevice.findAll({ where: await scopeChildAssetWhereToOwner(req), order: [['deviceType', 'ASC'], ['name', 'ASC']] });
     return res.json(devices);
   });
 
@@ -250,9 +232,15 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     body('firmwareVersion').optional().isString().trim().isLength({ min: 1, max: 64 }),
     body('idsIpsEnabled').optional().isBoolean(),
     body('passiveScanEnabled').optional().isBoolean(),
+    body('applicationAssetId').optional().isInt({ min: 1 }),
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      if (req.body.applicationAssetId) {
+        const parent = await ApplicationAsset.findByPk(req.body.applicationAssetId);
+        if (!parent) return res.status(422).json({ error: 'applicationAssetId does not refer to a real registered application' });
+      }
 
       try {
         const created = await NetworkDevice.create({
@@ -265,6 +253,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
           firmwareVersion: req.body.firmwareVersion || null,
           idsIpsEnabled: Boolean(req.body.idsIpsEnabled),
           passiveScanEnabled: Boolean(req.body.passiveScanEnabled),
+          applicationAssetId: req.body.applicationAssetId || null,
           state: 'online',
           lastSeenAt: new Date(),
           riskScore: req.body.deviceType === 'router' || req.body.deviceType === 'firewall' ? 55 : 35,
@@ -416,8 +405,8 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json({ checked: true, intrusionDetected, findingId: createdFinding?.id || null, device });
   });
 
-  router.get('/database/assets', async (_req, res) => {
-    const assets = await DatabaseAsset.findAll({ order: [['criticality', 'DESC'], ['name', 'ASC']] });
+  router.get('/database/assets', async (req, res) => {
+    const assets = await DatabaseAsset.findAll({ where: await scopeChildAssetWhereToOwner(req), order: [['criticality', 'DESC'], ['name', 'ASC']] });
     return res.json(assets);
   });
 
@@ -434,9 +423,15 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     body('patchLevel').optional().isString().trim().isLength({ min: 1, max: 128 }),
     body('encryptionAtRest').optional().isBoolean(),
     body('tlsInTransit').optional().isBoolean(),
+    body('applicationAssetId').optional().isInt({ min: 1 }),
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      if (req.body.applicationAssetId) {
+        const parent = await ApplicationAsset.findByPk(req.body.applicationAssetId);
+        if (!parent) return res.status(422).json({ error: 'applicationAssetId does not refer to a real registered application' });
+      }
 
       try {
         const asset = await DatabaseAsset.create({
@@ -450,6 +445,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
           patchLevel: req.body.patchLevel || 'unknown',
           encryptionAtRest: Boolean(req.body.encryptionAtRest),
           tlsInTransit: Boolean(req.body.tlsInTransit),
+          applicationAssetId: req.body.applicationAssetId || null,
           state: 'online',
           backupStatus: 'unknown',
           lastSeenAt: new Date(),
@@ -530,7 +526,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json({ scanned: true, findings, asset });
   });
 
-  router.get('/database/overview', async (_req, res) => {
+  router.get('/database/overview', analystOrAdmin, async (_req, res) => {
     const cacheKey = 'database-overview';
     const cached = readAnalyticsCache(cacheKey);
     if (cached) return res.json(cached);
@@ -582,6 +578,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
 
   router.get(
     '/patches',
+    analystOrAdmin,
     query('status').optional().isIn(validPatchStatuses),
     query('assetType').optional().isIn(validPatchAssetTypes),
     async (req, res) => {
@@ -1210,7 +1207,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     });
   });
 
-  router.get('/detection/stack', async (_req, res) => {
+  router.get('/detection/stack', analystOrAdmin, async (_req, res) => {
     const byDomain = DETECTION_STACK.reduce((acc, item) => {
       if (!acc[item.domain]) acc[item.domain] = [];
       acc[item.domain].push(item);
@@ -1226,7 +1223,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     });
   });
 
-  router.get('/executive-impact', async (_req, res) => {
+  router.get('/executive-impact', analystOrAdmin, async (_req, res) => {
     const [activeFindings, totalFindings, openTickets, criticalFindings, criticalTickets, postmortemTickets, topFindings] = await Promise.all([
       SecurityFinding.count({ where: { status: { [Op.in]: ['new', 'investigating'] } } }),
       SecurityFinding.count(),
@@ -1272,7 +1269,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     });
   });
 
-  router.get('/threat-intel/overview', async (_req, res) => {
+  router.get('/threat-intel/overview', analystOrAdmin, async (_req, res) => {
     const cacheKey = 'threat-intel-overview';
     const cached = readAnalyticsCache(cacheKey);
     if (cached) return res.json(cached);
@@ -1368,7 +1365,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json(threatIntelPayload);
   });
 
-  router.get('/network-visibility/overview', async (_req, res) => {
+  router.get('/network-visibility/overview', analystOrAdmin, async (_req, res) => {
     const cacheKey = 'network-visibility-overview';
     const cached = readAnalyticsCache(cacheKey);
     if (cached) return res.json(cached);
@@ -1567,6 +1564,38 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json(withRuntime);
   });
 
+  router.get('/applications/:id/visitors/summary', param('id').isInt(), async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+    const asset = await ApplicationAsset.findByPk(req.params.id);
+    if (!asset) return res.status(404).json({ error: 'Asset not found' });
+
+    // Same not-found-not-forbidden treatment as /findings/:id/brief — an
+    // owner probing another org's asset id learns nothing from the response.
+    if (req.user?.role === 'owner') {
+      const requester = await User.findByPk(req.user.sub);
+      if (!requester?.email || asset.ownerEmail !== requester.email) {
+        return res.status(404).json({ error: 'Asset not found' });
+      }
+    }
+
+    const now = new Date();
+    const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const since7d = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    const [last24h, last7d] = await Promise.all([
+      VisitorEvent.findAll({ where: { applicationAssetId: asset.id, visitedAt: { [Op.gte]: since24h } }, attributes: ['ipAddress'], raw: true }),
+      VisitorEvent.findAll({ where: { applicationAssetId: asset.id, visitedAt: { [Op.gte]: since7d } }, attributes: ['ipAddress'], raw: true }),
+    ]);
+
+    return res.json({
+      generatedAt: now.toISOString(),
+      last24h: { totalVisits: last24h.length, uniqueIps: new Set(last24h.map((v) => v.ipAddress)).size },
+      last7d: { totalVisits: last7d.length, uniqueIps: new Set(last7d.map((v) => v.ipAddress)).size },
+    });
+  });
+
   router.post(
     '/applications',
     adminOnly,
@@ -1679,6 +1708,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
 
   router.get(
     '/scan/runs',
+    analystOrAdmin,
     query('assetType').optional().isIn(['application', 'network_device', 'database_asset', 'command_centre']),
     query('assetId').optional().isInt({ min: 1 }),
     query('toolId').optional().isString().trim().isLength({ min: 2, max: 64 }),
@@ -1816,14 +1846,34 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     },
   );
 
+  const FINDING_STATUSES = ['new', 'investigating', 'remediated', 'dismissed'];
+  const FINDING_SEVERITIES = ['low', 'medium', 'high', 'critical'];
+  // Comma-separated lists (e.g. "new,investigating") let callers like the
+  // Overview dashboard ask the server for exactly the rows a stat needs,
+  // instead of fetching one status/severity at a time and reassembling the
+  // count client-side against a capped, riskScore-sorted window — which
+  // silently undercounts once an org has more than `limit` findings in its
+  // history, since older resolved rows can still outrank open ones by score.
+  function parseCsvList(raw, allowed) {
+    if (!raw) return null;
+    const values = String(raw).split(',').map((v) => v.trim()).filter(Boolean);
+    if (values.length === 0) return null;
+    if (!values.every((v) => allowed.includes(v))) return undefined;
+    return values;
+  }
+
   router.get(
     '/findings',
-    query('status').optional().isIn(['new', 'investigating', 'remediated', 'dismissed']),
     async (req, res) => {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+      const statuses = parseCsvList(req.query.status, FINDING_STATUSES);
+      const severities = parseCsvList(req.query.severity, FINDING_SEVERITIES);
+      if (statuses === undefined || severities === undefined) {
+        return res.status(422).json({ errors: [{ msg: 'Invalid status or severity filter' }] });
+      }
 
-      const where = req.query.status ? { status: req.query.status } : {};
+      const where = {};
+      if (statuses) where.status = { [Op.in]: statuses };
+      if (severities) where.severity = { [Op.in]: severities };
       const assetWhere = await scopeAssetWhereToOwner(req);
       const applicationInclude = { model: ApplicationAsset, as: 'application' };
       // Only attach a `where` to the include when actually scoping to an
@@ -1835,7 +1885,10 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         where,
         include: [applicationInclude],
         order: [['riskScore', 'DESC'], ['createdAt', 'DESC']],
-        limit: 80,
+        // A generous internal cap, not real pagination — this SOC serves a
+        // handful of registered assets, so a single org realistically never
+        // approaches this many open+recent findings at once.
+        limit: 500,
       });
       return res.json(findings.map((f) => enrichFindingRecord(f)));
     },
@@ -1849,6 +1902,16 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       include: [{ model: ApplicationAsset, as: 'application' }],
     });
     if (!finding) return res.status(404).json({ error: 'Finding not found' });
+
+    // An owner can only reach this by ID guessing since the /findings list
+    // already filters to their own assets — treat an out-of-scope finding
+    // the same as a nonexistent one rather than confirming it exists.
+    if (req.user?.role === 'owner') {
+      const requester = await User.findByPk(req.user.sub);
+      if (!requester?.email || finding.application?.ownerEmail !== requester.email) {
+        return res.status(404).json({ error: 'Finding not found' });
+      }
+    }
 
     const enriched = enrichFindingRecord(finding);
     return res.json({
@@ -1869,6 +1932,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
 
   router.post(
     '/findings/:id/confirm',
+    analystOrAdmin,
     param('id').isInt(),
     async (req, res) => {
       const errors = validationResult(req);
@@ -1914,6 +1978,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
 
   router.post(
     '/findings/:id/create-ticket',
+    analystOrAdmin,
     body('assigneeId').optional().isString().trim().matches(SCJ_ID_REGEX),
     param('id').isInt(),
     async (req, res) => {
@@ -1945,6 +2010,18 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         assigneeId: req.body.assigneeId || null,
       });
 
+      // A ticket must always name the real asset it's about — the finding
+      // already knows which one, so link it automatically rather than
+      // leaving this ticket with no WHERE at all.
+      if (finding.application) {
+        await TicketAsset.create({
+          ticketId: ticket.id,
+          assetType: 'application',
+          assetId: finding.application.id,
+          assetName: finding.application.name,
+        });
+      }
+
       await TicketHistory.create({
         ticketId: ticket.id,
         eventType: 'created',
@@ -1967,6 +2044,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
 
   router.get(
     '/soc/live-feed',
+    analystOrAdmin,
     query('limit').optional().isInt({ min: 1, max: 200 }),
     query('since').optional().isISO8601(),
     async (req, res) => {
@@ -1979,19 +2057,19 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     },
   );
 
-  router.get('/soc/threat-origins', async (_req, res) => {
+  router.get('/soc/threat-origins', analystOrAdmin, async (_req, res) => {
     const origins = getThreatOrigins();
     const total = origins.reduce((s, o) => s + o.count, 0);
     const topCountry = origins[0]?.country || null;
     return res.json({ generatedAt: new Date().toISOString(), totalAttacks: total, topCountry, origins });
   });
 
-  router.get('/soc/recon-detections', async (_req, res) => {
+  router.get('/soc/recon-detections', analystOrAdmin, async (_req, res) => {
     const detections = getReconDetections();
     return res.json({ generatedAt: new Date().toISOString(), scannerCount: detections.length, detections });
   });
 
-  router.get('/soc/scheduler-state', async (_req, res) => {
+  router.get('/soc/scheduler-state', analystOrAdmin, async (_req, res) => {
     const state = getToolSchedulerState();
     const toolsWithState = TOOL_REGISTRY.map((tool) => ({
       id: tool.id,

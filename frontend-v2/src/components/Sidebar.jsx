@@ -4,10 +4,21 @@ import NavIcon from './NavIcon.jsx';
 import { NAV_ITEMS, NAV_SECTION_MANAGE, isGovernanceUser } from '../nav.js';
 import { useAuth } from '../auth/AuthContext.jsx';
 
+// An asset owner gets a deliberately narrow nav — just their own dashboard
+// and their own account settings. Every other tab is either internal
+// tooling they have no reason to see, or already refuses their role
+// server-side (see the analystOrAdmin gates in routes/security.js,
+// routes/tickets.js, routes/users.js) — hiding the links here is about
+// clarity, not the actual security boundary, which lives in the backend.
+const OWNER_NAV_ITEMS = [{ key: 'my-assets', label: 'My assets', path: '/', icon: 'server' }];
+const OWNER_MANAGE_ITEMS = [{ key: 'settings', label: 'Settings', path: '/settings', icon: 'settings' }];
+
 export default function Sidebar() {
   const { role, audienceCode } = useAuth();
+  const isOwner = role === 'owner';
   const canSeeGovernance = isGovernanceUser({ role, audienceCode });
-  const manageItems = NAV_SECTION_MANAGE.filter((item) => !item.governanceOnly || canSeeGovernance);
+  const navItems = isOwner ? OWNER_NAV_ITEMS : NAV_ITEMS;
+  const manageItems = isOwner ? OWNER_MANAGE_ITEMS : NAV_SECTION_MANAGE.filter((item) => !item.governanceOnly || canSeeGovernance);
 
   return (
     <nav style={styles.sidebar} aria-label="Primary">
@@ -15,7 +26,7 @@ export default function Sidebar() {
         <Logo size={22} />
         <span style={styles.logoText}>CommandCentre</span>
       </div>
-      {NAV_ITEMS.map((item) => (
+      {navItems.map((item) => (
         <NavLink
           key={item.key}
           to={item.path}
@@ -26,7 +37,7 @@ export default function Sidebar() {
           {item.label}
         </NavLink>
       ))}
-      <div style={styles.sectionLabel}>Manage</div>
+      {!isOwner && <div style={styles.sectionLabel}>Manage</div>}
       {manageItems.map((item) => (
         <NavLink
           key={item.key}

@@ -28,5 +28,12 @@ export default (sequelize) => {
     governanceTags: { type: DataTypes.JSON, allowNull: false, defaultValue: [] },
     creatorId: { type: DataTypes.INTEGER, allowNull: true },
     assigneeId: { type: DataTypes.STRING(14), allowNull: true },
+    // The WHY/HOW half of the ticket's 5W1H view. These were previously
+    // accepted by PATCH /api/tickets/:id's validators with no backing column
+    // at all — every submission silently vanished. Real columns now.
+    resolutionNotes: { type: DataTypes.TEXT, allowNull: true },
+    rootCause: { type: DataTypes.TEXT, allowNull: true },
+    actionsTaken: { type: DataTypes.TEXT, allowNull: true },
+    preventiveActions: { type: DataTypes.TEXT, allowNull: true },
   });
 };

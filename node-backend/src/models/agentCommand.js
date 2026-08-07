@@ -25,5 +25,10 @@ export default (sequelize) => {
     // knows exactly which rule to remove, rather than guessing.
     externalRef: { type: DataTypes.STRING(255), allowNull: true },
     failureReason: { type: DataTypes.STRING(500), allowNull: true },
+    // A stolen/leaked agent key used to be able to queue a command that
+    // would sit valid forever until some agent eventually polled for it —
+    // this bounds that window. Pending commands past this are treated as
+    // expired rather than delivered late.
+    expiresAt: { type: DataTypes.DATE, allowNull: true },
   });
 };

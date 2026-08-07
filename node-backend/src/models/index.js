@@ -42,6 +42,7 @@ export const initModels = async () => {
   const ticketModel = (await import('./ticket.js')).default(sequelize);
   // Dynamically import and initialize TicketHistory model
   const ticketHistoryModel = (await import('./ticketHistory.js')).default(sequelize);
+  const ticketAssetModel = (await import('./ticketAsset.js')).default(sequelize);
   const applicationAssetModel = (await import('./applicationAsset.js')).default(sequelize);
   const securityFindingModel = (await import('./securityFinding.js')).default(sequelize);
   const connectorDeadLetterModel = (await import('./connectorDeadLetter.js')).default(sequelize);
@@ -59,6 +60,7 @@ export const initModels = async () => {
   const securityStateModel = (await import('./securityState.js')).default(sequelize);
   const agentCommandModel = (await import('./agentCommand.js')).default(sequelize);
   const reportSnapshotModel = (await import('./reportSnapshot.js')).default(sequelize);
+  const visitorEventModel = (await import('./visitorEvent.js')).default(sequelize);
 
   // Define relationships by SCJ ID instead of numeric PK.
   userModel.hasMany(ticketModel, { foreignKey: 'assigneeId', sourceKey: 'scjId', as: 'assignedTickets', constraints: false });
@@ -78,6 +80,19 @@ export const initModels = async () => {
   applicationAssetModel.hasMany(securityFindingModel, { foreignKey: 'applicationAssetId', as: 'findings' });
   securityFindingModel.belongsTo(applicationAssetModel, { foreignKey: 'applicationAssetId', as: 'application' });
 
+  ticketModel.hasMany(ticketAssetModel, { foreignKey: 'ticketId', as: 'assets' });
+  ticketAssetModel.belongsTo(ticketModel, { foreignKey: 'ticketId', as: 'ticket' });
+
+  // Optional grouping of a database/device under the application it serves —
+  // see the comment on each model's applicationAssetId field.
+  applicationAssetModel.hasMany(databaseAssetModel, { foreignKey: 'applicationAssetId', as: 'databases' });
+  databaseAssetModel.belongsTo(applicationAssetModel, { foreignKey: 'applicationAssetId', as: 'application' });
+  applicationAssetModel.hasMany(networkDeviceModel, { foreignKey: 'applicationAssetId', as: 'devices' });
+  networkDeviceModel.belongsTo(applicationAssetModel, { foreignKey: 'applicationAssetId', as: 'application' });
+
+  applicationAssetModel.hasMany(visitorEventModel, { foreignKey: 'applicationAssetId', as: 'visitorEvents' });
+  visitorEventModel.belongsTo(applicationAssetModel, { foreignKey: 'applicationAssetId', as: 'application' });
+
   // Fail-closed tenant scoping (see services/tenantScoping.js): every one of
   // these models throws on any find/create/update/destroy that isn't
   // running inside a tenant context, rather than silently running unscoped.
@@ -85,11 +100,11 @@ export const initModels = async () => {
   // scoping it to a tenant would be circular), and RevokedToken (a global
   // JWT-jti blacklist keyed by a globally-unique token id, not tenant data).
   const tenantScopedModels = [
-    userModel, ticketModel, ticketHistoryModel, applicationAssetModel, securityFindingModel,
+    userModel, ticketModel, ticketHistoryModel, ticketAssetModel, applicationAssetModel, securityFindingModel,
     connectorDeadLetterModel, ticketResolutionReportModel, auditLogModel, ticketCommentModel,
     ticketActionItemModel, connectorReceiptModel, networkDeviceModel, databaseAssetModel,
     patchTaskModel, scanRunRecordModel, notificationLedgerModel, securityStateModel,
-    agentCommandModel, reportSnapshotModel,
+    agentCommandModel, reportSnapshotModel, visitorEventModel,
   ];
   for (const model of tenantScopedModels) applyTenantScoping(model);
 
@@ -191,6 +206,7 @@ export const initModels = async () => {
     await ensureColumn('Users', 'lastTelegramDeliveryStatus', { type: DataTypes.STRING(32), allowNull: true });
     await ensureColumn('Users', 'lastTelegramReadAt', { type: DataTypes.DATE, allowNull: true });
     await ensureColumn('Users', 'lastSeenGeo', { type: DataTypes.STRING(128), allowNull: true });
+    await ensureColumn('Users', 'knownLoginGeos', { type: DataTypes.JSON, allowNull: false, defaultValue: [] });
     await ensureColumn('Users', 'mfaEnabled', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
     await ensureColumn('Users', 'mfaSecret', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCode', { type: DataTypes.STRING(16), allowNull: true });
@@ -244,6 +260,15 @@ export const initModels = async () => {
     await ensureColumn('ApplicationAssets', 'lastSentinelHeartbeatAt', { type: DataTypes.DATE, allowNull: true });
     await ensureColumn('ApplicationAssets', 'lastKnownOpenPorts', { type: DataTypes.JSON, allowNull: true });
     await ensureNullable('ApplicationAssets', 'baseUrl');
+    await ensureColumn('DatabaseAssets', 'applicationAssetId', { type: DataTypes.INTEGER, allowNull: true });
+    await ensureColumn('NetworkDevices', 'applicationAssetId', { type: DataTypes.INTEGER, allowNull: true });
+    await ensureColumn('Tickets', 'resolutionNotes', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('Tickets', 'rootCause', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('Tickets', 'actionsTaken', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('Tickets', 'preventiveActions', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('PatchTasks', 'autoDetected', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
+    await ensureColumn('Organizations', 'connectorSecret', { type: DataTypes.TEXT, allowNull: true });
+    await ensureColumn('AgentCommands', 'expiresAt', { type: DataTypes.DATE, allowNull: true });
     await ensureColumn('AgentCommands', 'externalRef', { type: DataTypes.STRING(255), allowNull: true });
     await ensureColumn('AgentCommands', 'failureReason', { type: DataTypes.STRING(500), allowNull: true });
     await ensureEnumValue('enum_AgentCommands_status', 'failed');
@@ -280,10 +305,11 @@ export const initModels = async () => {
     // belongs there), then tightened to NOT NULL. Additive and safe to run
     // repeatedly — each step is a no-op once already applied.
     const tenantScopedTables = [
-      'Users', 'Tickets', 'TicketHistories', 'ApplicationAssets', 'SecurityFindings',
+      'Users', 'Tickets', 'TicketHistories', 'TicketAssets', 'ApplicationAssets', 'SecurityFindings',
       'ConnectorDeadLetters', 'TicketResolutionReports', 'AuditLogs', 'TicketComments',
       'TicketActionItems', 'ConnectorReceipts', 'NetworkDevices', 'DatabaseAssets',
       'PatchTasks', 'ScanRunRecords', 'NotificationLedgers', 'SecurityStates', 'AgentCommands',
+      'VisitorEvents',
     ];
     for (const tableName of tenantScopedTables) {
       await ensureColumn(tableName, 'organizationId', { type: DataTypes.INTEGER, allowNull: true });
@@ -333,6 +359,14 @@ export const initModels = async () => {
     await ensureIndex('NotificationLedgers', ['status'], 'idx_notification_ledgers_status');
     await ensureIndex('NotificationLedgers', ['createdAt'], 'idx_notification_ledgers_created_at');
     await ensureIndex('AgentCommands', ['applicationAssetId', 'status'], 'idx_agent_commands_asset_status');
+    await ensureIndex('TicketAssets', ['ticketId'], 'idx_ticket_assets_ticket_id');
+    await ensureIndex('TicketAssets', ['assetType', 'assetId'], 'idx_ticket_assets_asset');
+    await ensureIndex('DatabaseAssets', ['applicationAssetId'], 'idx_database_assets_application_asset_id');
+    await ensureIndex('NetworkDevices', ['applicationAssetId'], 'idx_network_devices_application_asset_id');
+    // Powers both the retention cleanup (delete-by-age, per asset) and the
+    // visitor summary query (recent rows for one asset) — the two access
+    // patterns this table actually serves.
+    await ensureIndex('VisitorEvents', ['applicationAssetId', 'visitedAt'], 'idx_visitor_events_asset_visited_at');
 
     // Every tenant-scoped query now filters by organizationId — index it on
     // every one of those tables, not just the ones that already had one.
@@ -347,6 +381,7 @@ export const initModels = async () => {
     userModel,
     ticketModel,
     ticketHistoryModel,
+    ticketAssetModel,
     applicationAssetModel,
     securityFindingModel,
     connectorDeadLetterModel,
@@ -364,5 +399,6 @@ export const initModels = async () => {
     securityStateModel,
     agentCommandModel,
     reportSnapshotModel,
+    visitorEventModel,
   };
 };

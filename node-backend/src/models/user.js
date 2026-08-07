@@ -43,5 +43,10 @@ export default (sequelize) => {
     lastTelegramDeliveryStatus: { type: DataTypes.STRING(32), allowNull: true },
     lastTelegramReadAt: { type: DataTypes.DATE, allowNull: true },
     lastSeenGeo: { type: DataTypes.STRING(128), allowNull: true },  // "City, Country" from ip-api
+    // Distinct "City, Country" strings seen on this user's past successful
+    // logins, capped (see AUTH_UNFAMILIAR_LOGIN in routes/auth.js). Compared
+    // by city, not raw IP — a home ISP reassigning a dynamic IP within the
+    // same city would otherwise trigger a false alarm on every login.
+    knownLoginGeos: { type: DataTypes.JSON, allowNull: false, defaultValue: [] },
   });
 };

@@ -24,6 +24,7 @@ export function createClient({ commandCentreUrl, assetId, agentKey }) {
     heartbeat: () => call('/agent-heartbeat', { method: 'POST' }),
     reportCanary: (nonce) => call('/agent-report', { method: 'POST', body: { type: 'canary_seen', nonce } }),
     reportFinding: (finding) => call('/agent-report', { method: 'POST', body: { type: 'finding', ...finding } }),
+    reportVisits: (visits) => call('/visit-report', { method: 'POST', body: { visits } }),
     fetchPendingCommands: () => call('/commands/pending'),
     ackCommand: (commandId) => call(`/commands/${commandId}/ack`, { method: 'POST' }),
   };
