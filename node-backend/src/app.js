@@ -39,7 +39,7 @@ import reportsRouteFactory from './routes/reports.js';
 import automationRouteFactory from './routes/automation.js';
 import webhooksRouteFactory from './routes/webhooks.js';
 import platformRouteFactory from './routes/platform.js';
-import { runSecuritySweep, healthSummary } from './services/securityEngine.js';
+import { runSecuritySweep, healthSummary, resolveNetworkFallbackAsset } from './services/securityEngine.js';
 import { runDowntimeSweep } from './services/downtimeMonitor.js';
 import { evaluateLoginGeo } from './services/loginAnomaly.js';
 import { recordScanRun } from './services/scanRunLedger.js';
@@ -1032,15 +1032,7 @@ async function setup() {
       const devices = await networkDeviceModel.findAll({ where: { monitoringEnabled: true } });
       if (!devices.length) return;
 
-      const [fallbackApp] = await applicationAssetModel.findOrCreate({
-        where: { name: 'Network Core Infrastructure' },
-        defaults: {
-          baseUrl: 'https://network-core.local',
-          environment: 'production',
-          ownerEmail: CONFIG.MANAGER_EMAIL || null,
-          healthStatus: 'unknown',
-        },
-      });
+      const fallbackApp = await resolveNetworkFallbackAsset(applicationAssetModel);
 
       const intervalMs = CONFIG.AUTOMATION_DEVICE_PASSIVE_INTERVAL_MINUTES * 60 * 1000;
       for (const device of devices) {
@@ -1140,15 +1132,7 @@ async function setup() {
       const devices = await networkDeviceModel.findAll({ where: { monitoringEnabled: true } });
       if (!devices.length) return;
 
-      const [fallbackApp] = await applicationAssetModel.findOrCreate({
-        where: { name: 'Network Core Infrastructure' },
-        defaults: {
-          baseUrl: 'https://network-core.local',
-          environment: 'production',
-          ownerEmail: CONFIG.MANAGER_EMAIL || null,
-          healthStatus: 'unknown',
-        },
-      });
+      const fallbackApp = await resolveNetworkFallbackAsset(applicationAssetModel);
 
       const intervalMs = CONFIG.AUTOMATION_DEVICE_IDS_INTERVAL_MINUTES * 60 * 1000;
       for (const device of devices) {
@@ -1236,11 +1220,11 @@ async function setup() {
             riskScore: nextRisk,
           },
         });
+        pushScanToolEvent({ toolName: 'Suricata', toolId: 'suricata', assetIp: device.ipAddress, assetName: device.name, assetType: 'network_device', findingCount: finding ? 1 : 0 });
+        recordToolSchedulerRun('suricata', { success: true });
       }
     } finally {
       automationLocks.deviceIds = false;
-      pushScanToolEvent({ toolName: 'Suricata', toolId: 'suricata', assetIp: device.ipAddress, assetName: device.name, assetType: 'network_device', findingCount: finding ? 1 : 0 });
-      recordToolSchedulerRun('suricata', { success: true });
     }
   };
 
@@ -1286,12 +1270,15 @@ async function setup() {
           });
         }
 
+        // Not Trivy — this checks stored configuration flags, not container/
+        // dependency vulnerabilities. A distinct toolId keeps this out of
+        // Trivy's real scan-coverage stats on the SOC feed / Fortress pages.
         await recordScanRun({
           ScanRunRecord: scanRunRecordModel,
           AuditLog: auditLogModel,
-          toolId: 'trivy',
-          toolName: 'Trivy',
-          engine: 'Trivy',
+          toolId: 'db-config-review',
+          toolName: 'Database Configuration Review',
+          engine: 'Config Audit',
           mode: 'active',
           triggerSource: 'scheduler',
           actor: 'scheduler',
@@ -1303,8 +1290,8 @@ async function setup() {
           findings: [],
           newFindingsCount: issueCount,
           detail: issueCount > 0
-            ? `Scheduled Trivy database review found ${issueCount} issue(s) on ${db.name}.`
-            : `Scheduled Trivy database review completed on ${db.name} with no issues.`,
+            ? `Scheduled database configuration review found ${issueCount} issue(s) on ${db.name}.`
+            : `Scheduled database configuration review completed on ${db.name} with no issues.`,
           startedAt,
           completedAt: new Date(),
           metadata: {
@@ -1314,11 +1301,11 @@ async function setup() {
             noOwner,
           },
         });
+        pushScanToolEvent({ toolName: 'Database Configuration Review', toolId: 'db-config-review', assetIp: db.host, assetName: db.name, assetType: 'database_asset', findingCount: issueCount });
+        recordToolSchedulerRun('db-config-review', { success: true });
       }
     } finally {
       automationLocks.databaseReview = false;
-      pushScanToolEvent({ toolName: 'Trivy', toolId: 'trivy', assetIp: db.host, assetName: db.name, assetType: 'database_asset', findingCount: issueCount });
-      recordToolSchedulerRun('trivy', { success: true });
     }
   };
 

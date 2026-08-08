@@ -1,16 +1,18 @@
 import express from 'express';
 import { body, param, query, validationResult } from 'express-validator';
 import { Op } from 'sequelize';
-import { ingestFinding, recomputeAssetHealth } from '../services/securityEngine.js';
+import { ingestFinding, recomputeAssetHealth, resolveNetworkFallbackAsset } from '../services/securityEngine.js';
 import { DETECTION_STACK, enrichFindingRecord } from '../services/findingIntelligence.js';
 import { recordScanRun } from '../services/scanRunLedger.js';
 import { TOOL_REGISTRY, getToolRegistryEntryByName } from '../services/toolRegistry.js';
 import { getLiveFeed, getThreatOrigins, getReconDetections } from '../services/socLiveFeed.js';
 import { probeApplicationRuntime } from '../services/livenessProbe.js';
+import { createDeviceProbe } from '../services/scanners/deviceProbe.js';
 
 const router = express.Router();
 const SCJ_ID_REGEX = /^\d{8}-\d{5}$/;
 const ANALYTICS_CACHE_TTL_MS = 12000;
+const deviceProbe = createDeviceProbe();
 
 export default ({ models, runSweep, getSummary, notifyTicket }) => {
   const {
@@ -275,34 +277,41 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     const device = await NetworkDevice.findByPk(Number(req.params.id));
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
-    const suspicious = Math.random() > 0.55;
+    // Real TCP-connect probe — same mechanism and "unreachable" signal the
+    // scheduled passive-scan automation uses (app.js), not a coin flip. A
+    // device with no declared IP can't actually be contacted.
     const now = new Date();
+    const probeResult = device.ipAddress
+      ? await deviceProbe.probe(device.ipAddress)
+      : { reachable: null, openPorts: [], highRiskOpenPorts: [] };
+    const suspicious = probeResult.reachable === false;
+    const nextRisk = suspicious ? Math.min(100, device.riskScore + 8) : Math.max(10, device.riskScore - 4);
+
     await device.update({
       passiveScanEnabled: true,
       lastPassiveScanAt: now,
       state: suspicious ? 'degraded' : 'online',
-      riskScore: Math.min(100, suspicious ? device.riskScore + 8 : Math.max(10, device.riskScore - 4)),
+      riskScore: nextRisk,
       lastSeenAt: now,
     });
 
     let createdFinding = null;
     if (suspicious) {
-      const fallbackApp = await ApplicationAsset.findOne({ order: [['id', 'ASC']] });
-      if (fallbackApp) {
-        createdFinding = await SecurityFinding.create({
-          applicationAssetId: fallbackApp.id,
-          sourceTool: 'Passive Network Scan',
-          detectionMode: 'passive',
-          category: 'network',
-          severity: device.deviceType === 'router' || device.deviceType === 'firewall' ? 'high' : 'medium',
-          title: `Suspicious traffic profile detected on ${device.name}`,
-          description: `Passive telemetry observed unusual communication patterns from ${device.name} (${device.ipAddress || 'unknown IP'})`,
-          evidence: `device=${device.name}; type=${device.deviceType}; location=${device.location || 'n/a'}`,
-          status: 'new',
-          requiresManualConfirmation: true,
-          manualConfirmed: false,
-        });
-      }
+      const fallbackApp = await resolveNetworkFallbackAsset(ApplicationAsset);
+      createdFinding = await SecurityFinding.create({
+        applicationAssetId: fallbackApp.id,
+        sourceTool: 'Passive Network Scan',
+        detectionMode: 'passive',
+        category: 'network',
+        severity: nextRisk >= 85 ? 'critical' : nextRisk >= 70 ? 'high' : 'medium',
+        title: `Passive scan found ${device.name} unreachable`,
+        description: `Manual passive scan found ${device.name} (${device.deviceType}, ${device.ipAddress || 'no IP configured'}) unreachable on every commonly-checked port — it may be down or unreachable from the command centre.`,
+        evidence: `device=${device.name}; ip=${device.ipAddress || 'n/a'}; state=${device.state}; risk=${nextRisk}`,
+        status: 'new',
+        requiresManualConfirmation: false,
+        manualConfirmed: true,
+        manualConfirmedBy: req.user.username,
+      });
     }
 
     await recordScanRun({
@@ -322,13 +331,14 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       findings: createdFinding ? [createdFinding] : [],
       newFindingsCount: createdFinding ? 1 : 0,
       detail: suspicious
-        ? `Zeek passive telemetry observed suspicious traffic on ${device.name}.`
-        : `Zeek passive telemetry completed on ${device.name} with no suspicious activity.`,
+        ? `Passive scan found ${device.name} unreachable on every commonly-checked port.`
+        : `Passive scan completed on ${device.name} with no reachability issues.`,
       startedAt: now,
       completedAt: new Date(),
       metadata: {
         deviceType: device.deviceType,
         location: device.location || null,
+        openPorts: probeResult.openPorts,
       },
       ipAddress: req.ip,
     });
@@ -343,35 +353,42 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     const device = await NetworkDevice.findByPk(Number(req.params.id));
     if (!device) return res.status(404).json({ error: 'Device not found' });
 
-    const intrusionDetected = Math.random() > 0.68;
+    // Real signal — an actually-open, classically exploitable protocol
+    // (RDP/Telnet/FTP/VNC) — same probe and threshold the scheduled IDS/IPS
+    // automation uses (app.js), not a coin flip.
     const now = new Date();
+    const probeResult = device.ipAddress
+      ? await deviceProbe.probe(device.ipAddress)
+      : { reachable: null, openPorts: [], highRiskOpenPorts: [] };
+    const intrusionDetected = probeResult.highRiskOpenPorts.length > 0;
+    const nextRisk = intrusionDetected ? Math.min(100, device.riskScore + 12) : Math.max(10, device.riskScore - 3);
+
     await device.update({
       idsIpsEnabled: true,
       lastIdsIpsEventAt: now,
       state: intrusionDetected ? 'degraded' : 'online',
-      riskScore: Math.min(100, intrusionDetected ? device.riskScore + 12 : Math.max(10, device.riskScore - 3)),
+      riskScore: nextRisk,
       lastSeenAt: now,
     });
 
     let createdFinding = null;
     if (intrusionDetected) {
-      const fallbackApp = await ApplicationAsset.findOne({ order: [['id', 'ASC']] });
-      if (fallbackApp) {
-        createdFinding = await SecurityFinding.create({
-          applicationAssetId: fallbackApp.id,
-          sourceTool: 'IDS/IPS Check',
-          detectionMode: 'passive',
-          category: 'intrusion',
-          severity: device.deviceType === 'router' || device.deviceType === 'firewall' ? 'critical' : 'high',
-          title: `Potential intrusion activity flagged on ${device.name}`,
-          description: `IDS/IPS heuristic triggered for ${device.name}. Investigate east-west and north-south flows immediately.`,
-          evidence: `device=${device.name}; type=${device.deviceType}; ip=${device.ipAddress || 'n/a'}`,
-          status: 'new',
-          requiresManualConfirmation: false,
-          manualConfirmed: true,
-          manualConfirmedBy: req.user.username,
-        });
-      }
+      const exposureList = probeResult.highRiskOpenPorts.map((p) => `port ${p.port} (${p.reason})`).join(', ');
+      const fallbackApp = await resolveNetworkFallbackAsset(ApplicationAsset);
+      createdFinding = await SecurityFinding.create({
+        applicationAssetId: fallbackApp.id,
+        sourceTool: 'IDS/IPS Check',
+        detectionMode: 'passive',
+        category: 'intrusion',
+        severity: nextRisk >= 85 ? 'critical' : 'high',
+        title: `IDS/IPS check found exposed high-risk service on ${device.name}`,
+        description: `Manual IDS/IPS check found ${device.name} exposing ${exposureList} — a classic entry point if this device is internet-facing.`,
+        evidence: `device=${device.name}; type=${device.deviceType}; ip=${device.ipAddress || 'n/a'}; openPorts=${probeResult.openPorts.join(',')}; highRisk=${probeResult.highRiskOpenPorts.map((p) => p.port).join(',')}; risk=${nextRisk}`,
+        status: 'new',
+        requiresManualConfirmation: false,
+        manualConfirmed: true,
+        manualConfirmedBy: req.user.username,
+      });
     }
 
     await recordScanRun({
@@ -391,13 +408,14 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       findings: createdFinding ? [createdFinding] : [],
       newFindingsCount: createdFinding ? 1 : 0,
       detail: intrusionDetected
-        ? `Suricata IDS/IPS detected intrusion indicators on ${device.name}.`
-        : `Suricata IDS/IPS check completed on ${device.name} with no intrusion indicators.`,
+        ? `IDS/IPS check found ${device.name} exposing a high-risk service.`
+        : `IDS/IPS check completed on ${device.name} with no high-risk services exposed.`,
       startedAt: now,
       completedAt: new Date(),
       metadata: {
         deviceType: device.deviceType,
         location: device.location || null,
+        openPorts: probeResult.openPorts,
       },
       ipAddress: req.ip,
     });
@@ -495,12 +513,16 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       lastSeenAt: now,
     });
 
+    // Not Trivy — this checks stored configuration flags (patch level,
+    // encryption, ownership), not container/dependency vulnerabilities.
+    // Using a distinct toolId here (rather than 'trivy') keeps this out of
+    // Trivy's real scan-coverage stats on the SOC feed / Fortress pages.
     await recordScanRun({
       ScanRunRecord,
       AuditLog,
-      toolId: 'trivy',
-      toolName: 'Trivy',
-      engine: 'Trivy',
+      toolId: 'db-config-review',
+      toolName: 'Database Configuration Review',
+      engine: 'Config Audit',
       mode: 'active',
       triggerSource: 'manual',
       actor: req.user.username,
@@ -512,8 +534,8 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       findings: [],
       newFindingsCount: findings.length,
       detail: findings.length > 0
-        ? `Trivy database security review found ${findings.length} issue(s) on ${asset.name}.`
-        : `Trivy database security review completed on ${asset.name} with no issues.`,
+        ? `Database configuration review found ${findings.length} issue(s) on ${asset.name}.`
+        : `Database configuration review completed on ${asset.name} with no issues.`,
       startedAt: now,
       completedAt: new Date(),
       metadata: {
