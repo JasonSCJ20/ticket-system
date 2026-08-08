@@ -19,6 +19,10 @@ const CONTROL_STATUS = {
   controlled: { text: 'Healthy', tone: 'ok', color: 'var(--success)' },
   watch: { text: 'Degraded', tone: 'warning', color: 'var(--warning)' },
   critical: { text: 'Critical', tone: 'danger', color: 'var(--danger)' },
+  // Deliberately neutral, not warning-colored — this means nothing has been
+  // registered to protect yet (e.g. no databases/network devices added),
+  // not that something is actually wrong.
+  not_configured: { text: 'Not set up yet', tone: 'muted', color: 'var(--text-muted)' },
 };
 
 function scoreColor(score) {

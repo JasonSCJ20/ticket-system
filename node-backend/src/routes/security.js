@@ -1003,12 +1003,17 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
           ? 'exposed'
           : 'critical';
 
+    // 'not_configured' is deliberately distinct from 'watch' — a control
+    // with zero registered databases/network devices isn't "degraded," it's
+    // "nothing has been onboarded to protect yet." Conflating the two made
+    // "add your first database" look identical to an actual active problem
+    // (e.g. backups genuinely failing) on the same dashboard.
     const controlStatus = {
       identity: adminCount === 1 ? 'controlled' : 'watch',
       patching: overduePatches > 0 ? 'critical' : pendingPatches > 0 ? 'watch' : 'controlled',
-      dataProtection: databases.length === 0 ? 'watch' : databases.length === hardenedDatabases ? 'controlled' : 'watch',
-      recovery: criticalBackups > 0 ? 'critical' : warningBackups > 0 ? 'watch' : databases.length > 0 ? 'controlled' : 'watch',
-      detection: devices.length === 0 ? 'watch' : idsEnabledDevices > 0 ? 'controlled' : 'critical',
+      dataProtection: databases.length === 0 ? 'not_configured' : databases.length === hardenedDatabases ? 'controlled' : 'watch',
+      recovery: databases.length === 0 ? 'not_configured' : criticalBackups > 0 ? 'critical' : warningBackups > 0 ? 'watch' : 'controlled',
+      detection: devices.length === 0 ? 'not_configured' : idsEnabledDevices > 0 ? 'controlled' : 'critical',
       telemetry: toolingCriticalSilentCount > 0 ? 'critical' : toolingWatchSilentCount > 0 ? 'watch' : auditEvents > 0 ? 'controlled' : 'watch',
     };
 
