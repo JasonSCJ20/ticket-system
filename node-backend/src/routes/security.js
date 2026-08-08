@@ -2084,8 +2084,16 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
   // real findings, because it was looking in the wrong place. Now reads
   // the same real ScanRunRecord table every other tool-status view uses.
   router.get('/soc/scheduler-state', analystOrAdmin, async (_req, res) => {
+    // Scoped to a recent window, not all-time history — matching the same
+    // 24h convention already used for tool coverage in /fortress/posture.
+    // Without this, a tool that failed for weeks before being fixed (e.g.
+    // the real "spawn <tool> ENOENT" incident these four tools all had
+    // until their binaries were actually installed) would stay flagged as
+    // failing forever afterward, even once it's demonstrably running clean.
+    const recentWindowStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const scanRuns = await ScanRunRecord.findAll({
       attributes: ['toolId', 'status', 'completedAt', 'startedAt', 'createdAt'],
+      where: { createdAt: { [Op.gte]: recentWindowStart } },
       raw: true,
     });
 
