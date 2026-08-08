@@ -104,6 +104,44 @@ describe('createTrivyScanner', () => {
 
     expect(await scanner.scan('/repo')).toEqual([]);
   });
+
+  it('scanConfig parses real trivy IaC misconfiguration JSON via the config subcommand', async () => {
+    const fixture = JSON.stringify({
+      Results: [
+        {
+          Target: 'Dockerfile',
+          Misconfigurations: [
+            {
+              ID: 'DS002',
+              Title: 'Image user should not be root',
+              Message: 'Specify at least 1 USER command in Dockerfile',
+              Resolution: 'Add USER statement',
+              Severity: 'HIGH',
+              PrimaryURL: 'https://avd.aquasec.com/misconfig/ds002',
+            },
+          ],
+        },
+      ],
+    });
+    const run = jest.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    const readReportFile = jest.fn().mockResolvedValue(fixture);
+    const scanner = createTrivyScanner({ run, readReportFile, cleanupReportFile: jest.fn() });
+
+    const findings = await scanner.scanConfig('/repo');
+
+    expect(run).toHaveBeenCalledWith('trivy', expect.arrayContaining(['config', '/repo']));
+    expect(findings).toEqual([
+      {
+        checkId: 'DS002',
+        title: 'Image user should not be root',
+        description: 'Specify at least 1 USER command in Dockerfile',
+        resolution: 'Add USER statement',
+        severity: 'high',
+        target: 'Dockerfile',
+        url: 'https://avd.aquasec.com/misconfig/ds002',
+      },
+    ]);
+  });
 });
 
 describe('createSemgrepScanner', () => {

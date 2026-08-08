@@ -9,25 +9,41 @@ const execFileP = promisify(execFileCb);
 
 const SEVERITY_MAP = { ERROR: 'high', WARNING: 'medium', INFO: 'low' };
 
+// Explicit, curated security-focused registry packs — all free/public,
+// resolved over the network with no login required (Semgrep's Pro rules
+// within these packs are skipped, not erred on, when unauthenticated).
+// Replaces the old --config auto, which pulls a generic, general-purpose
+// ruleset tuned for code quality rather than security specifically —
+// these packs are purpose-built for exactly what a SOC platform's own
+// self-scan should be checking for.
+const SEMGREP_CONFIGS = [
+  'p/security-audit',
+  'p/owasp-top-ten',
+  'p/secrets',
+  'p/javascript',
+  'p/typescript',
+  'p/dockerfile',
+];
+
 // Real static-analysis scanning via the actual semgrep binary, run against
-// the platform's own source trees with its community-maintained "auto"
-// ruleset (JS/TS/Node-relevant security rules resolved automatically).
-// Replaces the old dice-roll "Insecure code pattern identified" canned
-// finding in securityEngine.js.
+// the platform's own source trees. Replaces the old dice-roll "Insecure
+// code pattern identified" canned finding in securityEngine.js.
 export function createSemgrepScanner({
   run = execFileP,
   readReportFile = (p) => readFile(p, 'utf8'),
   cleanupReportFile = (p) => unlink(p).catch(() => {}),
+  configs = SEMGREP_CONFIGS,
 } = {}) {
   async function scan(sourcePath) {
     const reportPath = path.join(tmpdir(), `semgrep-report-${crypto.randomBytes(8).toString('hex')}.json`);
     try {
       await run('semgrep', [
         'scan',
-        '--config', 'auto',
+        ...configs.flatMap((config) => ['--config', config]),
         '--json',
         '--output', reportPath,
         '--exclude', 'node_modules',
+        '--metrics', 'off',
         sourcePath,
       ]);
       const raw = await readReportFile(reportPath);

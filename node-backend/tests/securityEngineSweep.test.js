@@ -46,7 +46,7 @@ describe('runSecuritySweep (real orchestration, faked scanner processes)', () =>
 
     const scanners = {
       gitleaks: { scan: jest.fn().mockResolvedValue([{ ruleId: 'aws-key', file: 'src/x.js', line: 5, description: 'AWS key', fingerprint: 'fp-1' }]) },
-      trivy: { scan: jest.fn().mockResolvedValue([]) },
+      trivy: { scan: jest.fn().mockResolvedValue([]), scanConfig: jest.fn().mockResolvedValue([]) },
       semgrep: { scan: jest.fn().mockResolvedValue([]) },
       nuclei: { scan: jest.fn().mockResolvedValue([{ templateId: 'exposed-panel', name: 'Exposed panel', severity: 'high', matchedAt: `${app.baseUrl}/admin` }]) },
     };
@@ -78,7 +78,7 @@ describe('runSecuritySweep (real orchestration, faked scanner processes)', () =>
     });
     const scanners = {
       gitleaks: { scan: jest.fn().mockResolvedValue([]) },
-      trivy: { scan: jest.fn().mockResolvedValue([]) },
+      trivy: { scan: jest.fn().mockResolvedValue([]), scanConfig: jest.fn().mockResolvedValue([]) },
       semgrep: { scan: jest.fn().mockResolvedValue([]) },
       nuclei: { scan: jest.fn().mockResolvedValue([]) },
     };
@@ -121,7 +121,7 @@ describe('runSecuritySweep (real orchestration, faked scanner processes)', () =>
     });
     const scanners = {
       gitleaks: { scan: jest.fn().mockResolvedValue([]) },
-      trivy: { scan: jest.fn().mockResolvedValue([]) },
+      trivy: { scan: jest.fn().mockResolvedValue([]), scanConfig: jest.fn().mockResolvedValue([]) },
       semgrep: { scan: jest.fn().mockResolvedValue([]) },
       nuclei: { scan: jest.fn().mockRejectedValue(new Error('nuclei binary not found')) },
     };
@@ -161,7 +161,7 @@ describe('runSecuritySweep (real orchestration, faked scanner processes)', () =>
           target: 'package-lock.json',
           url: null,
         },
-      ]) },
+      ]), scanConfig: jest.fn().mockResolvedValue([]) },
       semgrep: { scan: jest.fn().mockResolvedValue([]) },
       nuclei: { scan: jest.fn().mockResolvedValue([]) },
     };

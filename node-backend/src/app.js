@@ -39,7 +39,7 @@ import reportsRouteFactory from './routes/reports.js';
 import automationRouteFactory from './routes/automation.js';
 import webhooksRouteFactory from './routes/webhooks.js';
 import platformRouteFactory from './routes/platform.js';
-import { runSecuritySweep, healthSummary, resolveNetworkFallbackAsset } from './services/securityEngine.js';
+import { runSecuritySweep, healthSummary, resolveNetworkFallbackAsset, DEFAULT_SCANNERS } from './services/securityEngine.js';
 import { runDowntimeSweep } from './services/downtimeMonitor.js';
 import { evaluateLoginGeo } from './services/loginAnomaly.js';
 import { recordScanRun } from './services/scanRunLedger.js';
@@ -1544,6 +1544,14 @@ async function setup() {
       },
       notifyTicket: notify,
     }));
+  });
+
+  // Nuclei's template library was previously only ever updated once, at
+  // Docker image build time — CVE/exposure coverage silently froze at
+  // whatever existed that day, with no signal that it was going stale.
+  // Runs once daily, independent of any image rebuild.
+  cron.schedule('0 4 * * *', async () => {
+    await DEFAULT_SCANNERS.nuclei.updateTemplates().catch((err) => logger.error({ err }, 'Nuclei template update failed'));
   });
 
   // Real liveness sweep — every registered application, network device, and

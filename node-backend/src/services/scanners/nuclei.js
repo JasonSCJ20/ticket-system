@@ -36,6 +36,15 @@ export function createNucleiScanner({
         '-jsonl',
         '-o', reportPath,
         '-severity', 'medium,high,critical',
+        // These targets are real, live, paying-client production sites —
+        // exclude template categories that are disruptive-by-design (DoS,
+        // fuzzing, generally "intrusive") rather than simply informational.
+        // A false-positive vulnerability finding is an inconvenience; a
+        // scan that knocks over a client's site is a real incident.
+        '-etags', 'dos,fuzz,intrusive',
+        // Politeness limit — the nuclei default (150 rps) is tuned for a
+        // test lab, not someone else's small production server.
+        '-rate-limit', '50',
         '-silent',
       ]);
       // nuclei doesn't always create the output file if nothing matched.
@@ -57,5 +66,14 @@ export function createNucleiScanner({
     }
   }
 
-  return { scan };
+  // The Dockerfile only ever ran this once, at image-build time — template
+  // (and therefore CVE) coverage was silently freezing at whatever existed
+  // on the day of the last image build, with no way to notice it going
+  // stale. Called on a recurring schedule (see app.js) so real coverage
+  // keeps up with newly published templates without needing a rebuild.
+  async function updateTemplates() {
+    await run('nuclei', ['-update-templates', '-silent']);
+  }
+
+  return { scan, updateTemplates };
 }

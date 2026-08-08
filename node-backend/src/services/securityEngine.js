@@ -76,7 +76,7 @@ const SELF_SCAN_HANDLERS = {
   },
   async Trivy(scanners, sourcePath) {
     const vulns = await scanners.trivy.scan(sourcePath);
-    return vulns.map((vuln) => ({
+    const vulnFindings = vulns.map((vuln) => ({
       externalEventId: `${vuln.package}@${vuln.installedVersion}:${vuln.cveId}`,
       severity: vuln.severity,
       title: `${vuln.cveId}: ${vuln.title}`,
@@ -90,6 +90,20 @@ const SELF_SCAN_HANDLERS = {
       installedVersion: vuln.installedVersion,
       fixedVersion: vuln.fixedVersion,
     }));
+
+    // Real IaC misconfiguration scanning of the Dockerfile — a genuinely
+    // different check from the dependency-CVE scan above, using the same
+    // real binary's `config` subcommand.
+    const misconfigs = await scanners.trivy.scanConfig(sourcePath);
+    const misconfigFindings = misconfigs.map((m) => ({
+      externalEventId: `${m.checkId}:${m.target}`,
+      severity: m.severity,
+      title: `${m.checkId}: ${m.title}`,
+      description: `${m.description}${m.resolution ? ` Resolution: ${m.resolution}.` : ''} (${m.target})`,
+      evidence: JSON.stringify(m),
+    }));
+
+    return [...vulnFindings, ...misconfigFindings];
   },
   async Semgrep(scanners, sourcePath) {
     const hits = await scanners.semgrep.scan(sourcePath);

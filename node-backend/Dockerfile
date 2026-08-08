@@ -46,6 +46,12 @@ RUN npm ci --omit=dev --ignore-scripts
 # Copy source.
 COPY src/ ./src/
 
+# This Dockerfile itself, so trivy config (real IaC misconfiguration
+# scanning — missing USER, secrets in ENV, :latest tags, etc.) has
+# something to actually check. Not sensitive; same file already public
+# in the repo.
+COPY Dockerfile ./Dockerfile
+
 # Non-root user for defence-in-depth. Needs a real home directory (unlike
 # before) because Nuclei caches its community template library under
 # $HOME, and Trivy caches its vulnerability database the same way — both

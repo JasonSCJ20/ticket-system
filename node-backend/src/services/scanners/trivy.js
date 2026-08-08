@@ -54,5 +54,43 @@ export function createTrivyScanner({
     }
   }
 
-  return { scan };
+  // Real IaC misconfiguration scanning (`trivy config`) — a genuinely
+  // different check from `scan` above (dependency CVEs): this parses the
+  // Dockerfile itself for real misconfigurations (missing USER directive
+  // running as root, secrets baked into ENV, `:latest` base image tags,
+  // etc.), a capability that existed in this binary from day one but was
+  // never invoked.
+  async function scanConfig(sourcePath) {
+    const reportPath = path.join(tmpdir(), `trivy-config-report-${crypto.randomBytes(8).toString('hex')}.json`);
+    try {
+      await run('trivy', [
+        'config',
+        '--format', 'json',
+        '--output', reportPath,
+        '--severity', 'MEDIUM,HIGH,CRITICAL',
+        sourcePath,
+      ]);
+      const raw = await readReportFile(reportPath);
+      const report = raw.trim() ? JSON.parse(raw) : {};
+      const findings = [];
+      for (const result of report.Results || []) {
+        for (const misconfig of result.Misconfigurations || []) {
+          findings.push({
+            checkId: misconfig.ID,
+            title: misconfig.Title,
+            description: misconfig.Message || misconfig.Description,
+            resolution: misconfig.Resolution || null,
+            severity: SEVERITY_MAP[misconfig.Severity] || 'medium',
+            target: result.Target,
+            url: misconfig.PrimaryURL || null,
+          });
+        }
+      }
+      return findings;
+    } finally {
+      await cleanupReportFile(reportPath);
+    }
+  }
+
+  return { scan, scanConfig };
 }
