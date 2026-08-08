@@ -576,6 +576,14 @@ export async function runSecuritySweep({ mode, actor = 'system', models, notifyT
     await app.update(mode === 'active'
       ? { lastActiveScanAt: scanStartedAt }
       : { lastPassiveScanAt: scanStartedAt });
+
+    // Recomputed unconditionally on every sweep, not just when this sweep
+    // itself created a finding — otherwise an asset whose only open finding
+    // gets cleared by some other path (a bulk dismiss, a different tool's
+    // sweep) keeps showing its old health until something coincidentally
+    // creates or changes a finding for it again. This is what actually
+    // makes healthStatus a continuously live value instead of a reactive one.
+    await recomputeAssetHealth(app.id, { ApplicationAsset, SecurityFinding: models.SecurityFinding });
   }
 
   return createdFindings;
