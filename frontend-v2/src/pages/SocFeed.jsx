@@ -133,18 +133,30 @@ function originFlag(data, code) {
   return match?.flag || '';
 }
 
+// Judged by the MOST RECENT run, not a lifetime tally within the window —
+// a tool that failed 40 times before a real fix landed, then has run clean
+// on every cycle since, is working right now. Flagging it "needs
+// attention" until every old failure ages out of the 24h window (which
+// could be most of a day) would misrepresent current, genuinely live
+// state — exactly the kind of stale signal this platform exists to avoid.
 function toolStatus(s) {
   if (s.totalRuns === 0) {
     return { tone: 'muted', color: 'text-muted', text: 'Not running yet' };
   }
-  if (s.mode === 'active' && s.failureCount === 0) {
-    const when = s.lastSuccessAt ? new Date(s.lastSuccessAt).toLocaleString() : 'unknown time';
-    return { tone: 'ok', color: 'success', text: `Working · last ran ${when}` };
+
+  const lastSuccessAt = s.lastSuccessAt ? new Date(s.lastSuccessAt).getTime() : null;
+  const lastFailureAt = s.lastFailureAt ? new Date(s.lastFailureAt).getTime() : null;
+  const mostRecentRunSucceeded = lastSuccessAt !== null && (lastFailureAt === null || lastSuccessAt > lastFailureAt);
+
+  if (mostRecentRunSucceeded) {
+    const when = new Date(s.lastSuccessAt).toLocaleString();
+    const resolvedNote = s.failureCount > 0
+      ? ` (${s.failureCount} earlier failure${s.failureCount === 1 ? '' : 's'} in this window, since resolved)`
+      : '';
+    return { tone: 'ok', color: 'success', text: `Working · last ran ${when}${resolvedNote}` };
   }
-  if (s.failureCount > 0) {
-    return { tone: 'danger', color: 'danger', text: `Needs attention · ${s.failureCount} failure${s.failureCount === 1 ? '' : 's'}` };
-  }
-  return { tone: 'warning', color: 'warning', text: 'Needs attention' };
+
+  return { tone: 'danger', color: 'danger', text: `Needs attention · ${s.failureCount} failure${s.failureCount === 1 ? '' : 's'}` };
 }
 
 const refreshBtn = { padding: '5px 10px', borderRadius: 6, border: '1px solid var(--accent)', background: 'transparent', color: 'var(--accent)', fontSize: 11, fontWeight: 600, cursor: 'pointer' };
