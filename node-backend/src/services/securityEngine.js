@@ -91,7 +91,7 @@ async function resolveCommandCentrePlatformAsset(ApplicationAsset) {
   const [app] = await ApplicationAsset.findOrCreate({
     where: { name: COMMAND_CENTRE_PLATFORM_APP_NAME },
     defaults: {
-      baseUrl: 'https://internal.commandcentre.local',
+      baseUrl: 'https://soc-api.scratchsolidsolutions.org/api/healthz',
       environment: 'production',
       enabled: false,
       healthStatus: 'unknown',

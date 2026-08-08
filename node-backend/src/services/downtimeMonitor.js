@@ -1,4 +1,4 @@
-import { ingestFinding } from './securityEngine.js';
+import { ingestFinding, recomputeAssetHealth } from './securityEngine.js';
 import { probeApplicationRuntime, probeTcpReachability, probeDeviceReachability } from './livenessProbe.js';
 
 const DOWNTIME_CATEGORY = 'availability';
@@ -55,7 +55,13 @@ export async function runDowntimeSweep({ models, notifyTicket, probes = DEFAULT_
   const { ApplicationAsset, NetworkDevice, DatabaseAsset, SecurityFinding } = models;
   const results = { checked: 0, newlyDown: 0, recovered: 0 };
 
-  const apps = await ApplicationAsset.findAll({ where: {} });
+  // enabled: true only — excludes bookkeeping-only rows (e.g. the internal
+  // self-scan asset securityEngine.js creates with a placeholder baseUrl)
+  // from live probing, matching the same filter runSecuritySweep already
+  // uses. Without this, a disabled row with no real address to check still
+  // gets probed every 5 minutes and can never recover, sitting "critical"
+  // forever.
+  const apps = await ApplicationAsset.findAll({ where: { enabled: true } });
   for (const app of apps) {
     if (!app.baseUrl) continue;
     results.checked += 1;
@@ -82,6 +88,7 @@ export async function runDowntimeSweep({ models, notifyTicket, probes = DEFAULT_
       }
     } else if (openFinding) {
       await markRecovered(openFinding, `${app.name} responded normally again at ${probe.checkedAt}.`);
+      await recomputeAssetHealth(app.id, { ApplicationAsset, SecurityFinding });
       results.recovered += 1;
     }
   }
