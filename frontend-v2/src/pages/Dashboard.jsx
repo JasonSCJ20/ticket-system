@@ -11,8 +11,12 @@ const CONTROL_LABELS = {
   telemetry: 'Telemetry',
 };
 
-const CONTROL_COLOR = { controlled: 'var(--success)', watch: 'var(--warning)', critical: 'var(--danger)' };
-const CONTROL_LABEL_TEXT = { controlled: 'Healthy', watch: 'Degraded', critical: 'Critical' };
+// not_configured is deliberately neutral, not warning-colored — it means
+// nothing has been registered to protect yet (no databases/network
+// devices added), not that something is actually wrong. Kept in sync
+// with the same distinction Fortress.jsx makes for the dedicated page.
+const CONTROL_COLOR = { controlled: 'var(--success)', watch: 'var(--warning)', critical: 'var(--danger)', not_configured: 'var(--text-muted)' };
+const CONTROL_LABEL_TEXT = { controlled: 'Healthy', watch: 'Degraded', critical: 'Critical', not_configured: 'Not set up yet' };
 
 function assetProtectionStatus(app) {
   if (app.enforcementModel === 'none') return { tone: 'danger', label: 'Not set up' };

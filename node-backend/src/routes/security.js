@@ -930,6 +930,23 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     });
 
     const deriveTelemetryHealth = (tool) => {
+      // A tool that has never once produced any record — no heartbeat, no
+      // scan run, not even a "skipped" bookkeeping entry — has no telemetry
+      // to be "silent" about. That word implies an established channel
+      // going quiet; this is a tool with no real connector deployed at
+      // all yet (e.g. Suricata/Wazuh/Prometheus with no external instance
+      // pointed at CommandCentre). Scoring that identically to a genuine
+      // silence — a real integration that stopped reporting — was the same
+      // "not set up" vs "active problem" conflation already fixed for the
+      // Fortress controls above, just in this separate code path.
+      if (!tool.lastSeenAt && tool.auditableRunsCount === 0) {
+        return {
+          state: 'not_configured',
+          lagMinutes: null,
+          reason: 'No real connector or scan has ever run for this tool',
+        };
+      }
+
       if (tool.status === 'offline') {
         return {
           state: 'critical',
