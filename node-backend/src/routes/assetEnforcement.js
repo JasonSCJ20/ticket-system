@@ -343,6 +343,46 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     return res.json({ mode: asset.enforcementMode });
   });
 
+  // Lets a mis-set enforcement model actually be corrected — before this,
+  // an asset that was set up as 'agent' by mistake (as happened with the
+  // platform's own real Cloudflare Workers assets, which need 'edge'
+  // instead) had no way back to a clean slate: the edge-credential setup
+  // form only renders when enforcementModel is 'none', and there was no
+  // path to get back there once a model had already been chosen. Clears
+  // every credential tied to whichever model was active, not just the
+  // enum field, so a stale agent key can't linger unused after switching.
+  router.post('/:id/reset-enforcement', authMiddleware, adminOnly, param('id').isInt(), async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+    const asset = await ApplicationAsset.findByPk(req.params.id);
+    if (!asset) return res.status(404).json({ error: 'Asset not found' });
+
+    const previousModel = asset.enforcementModel;
+    await asset.update({
+      enforcementModel: 'none',
+      enforcementMode: 'shadow',
+      verificationStatus: 'not_configured',
+      lastVerifiedAt: null,
+      lastHeartbeatAt: null,
+      agentKeyHash: null,
+      edgeCredentialSecret: null,
+      edgeCredentialMeta: null,
+    });
+
+    await AuditLog.create({
+      entityType: 'application_asset',
+      entityId: String(asset.id),
+      actor: req.user?.username || 'unknown',
+      actorRole: req.user?.role || null,
+      action: 'asset.enforcement_reset',
+      ipAddress: req.ip,
+      details: JSON.stringify({ assetId: asset.id, previousModel }),
+    });
+
+    return res.json({ enforcementModel: asset.enforcementModel });
+  });
+
   router.get('/:id/enforcement-status', authMiddleware, param('id').isInt(), async (req, res) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });

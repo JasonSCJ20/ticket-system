@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
+import { useAuth } from '../auth/AuthContext.jsx';
 import {
   issueAgentKey,
   setEdgeCredential,
@@ -10,6 +11,7 @@ import {
   queueAgentCommand,
   issueSentinelKey,
   setSentinelMode,
+  resetEnforcement,
 } from '../api/assetEnforcement.js';
 
 const VERIFICATION_TONE = { verified: 'ok', pending: 'high', degraded: 'high', failed: 'critical', not_configured: 'low' };
@@ -39,6 +41,7 @@ const inputStyle = {
 };
 
 export default function AssetDetail({ asset, onClose, onChanged }) {
+  const { role } = useAuth();
   const [busy, setBusy] = useState(false);
   const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [issuedKey, setIssuedKey] = useState(null);
@@ -113,6 +116,21 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
       onChanged();
     } catch (err) {
       notifyError(err, 'Failed to store that edge credential.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResetEnforcement = async () => {
+    if (!window.confirm(`Reset enforcement setup for ${asset.name}? This clears the current ${asset.enforcementModel} configuration and any stored credential/key for it — you'll need to set it up again from scratch.`)) return;
+    setBusy(true);
+    clear();
+    try {
+      await resetEnforcement(asset.id);
+      notifySuccess('Enforcement setup reset — choose a model below to start again.');
+      onChanged();
+    } catch (err) {
+      notifyError(err, 'Failed to reset enforcement setup.');
     } finally {
       setBusy(false);
     }
@@ -286,6 +304,19 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {asset.enforcementModel !== 'none' && role === 'admin' && (
+        <div style={{ marginBottom: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+          <p style={{ fontSize: 10.5, color: 'var(--text-muted)', margin: '0 0 8px' }}>
+            Enforcement model is set to <strong>{asset.enforcementModel}</strong>. Wrong for this asset (e.g. it turned
+            out to be a Cloudflare Workers app that needs edge enforcement instead of an embedded agent)? Reset it to
+            choose again.
+          </p>
+          <button disabled={busy} onClick={handleResetEnforcement} style={btnStyle('var(--danger)', true)}>
+            Change enforcement model
+          </button>
         </div>
       )}
 

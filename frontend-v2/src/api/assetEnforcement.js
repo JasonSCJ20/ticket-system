@@ -13,3 +13,4 @@ export const queueAgentCommand = (id, action, target, reason) =>
   request(`${base(id)}/commands`, { method: 'POST', body: { action, target, reason } });
 export const issueSentinelKey = (id) => request(`${base(id)}/sentinel-key`, { method: 'POST' });
 export const setSentinelMode = (id, mode) => request(`${base(id)}/sentinel-mode`, { method: 'PATCH', body: { mode } });
+export const resetEnforcement = (id) => request(`${base(id)}/reset-enforcement`, { method: 'POST' });
