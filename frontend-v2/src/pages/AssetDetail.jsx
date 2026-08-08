@@ -388,7 +388,11 @@ export default function AssetDetail({ asset, onClose, onChanged }) {
 
           <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
             <button disabled={busy} onClick={handleVerify} style={btnStyle('var(--accent)')}>
-              {verifyState === 'pending' ? 'Verifying…' : 'Run canary verification'}
+              {verifyState === 'pending'
+                ? 'Verifying…'
+                : asset.enforcementModel === 'edge'
+                  ? 'Verify credential'
+                  : 'Run canary verification'}
             </button>
             {asset.enforcementMode === 'shadow' ? (
               <button disabled={busy || asset.verificationStatus !== 'verified'} onClick={() => handlePromote('active')} style={btnStyle('var(--success)')}>
