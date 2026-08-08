@@ -83,17 +83,19 @@ const SELF_SCAN_HANDLERS = {
   },
 };
 
-// enabled: false is deliberate — this is a bookkeeping row for self-scan
-// findings, not a monitored customer asset. It must stay excluded from the
-// `enabled: true` application list runSecuritySweep iterates below, or it
-// would also receive a pointless Nuclei scan against its placeholder URL.
+// enabled: true — this row doubles as the bookkeeping target for self-scan
+// (Trivy/Gitleaks/Semgrep) findings AND, now that it has a real baseUrl
+// pointing at the platform's own production API, a genuinely monitored
+// asset: it gets the same real Nuclei active scanning and downtime checks
+// as any client asset. Previously excluded via enabled: false back when
+// baseUrl was still a placeholder that could never resolve.
 async function resolveCommandCentrePlatformAsset(ApplicationAsset) {
   const [app] = await ApplicationAsset.findOrCreate({
     where: { name: COMMAND_CENTRE_PLATFORM_APP_NAME },
     defaults: {
       baseUrl: 'https://soc-api.scratchsolidsolutions.org/api/healthz',
       environment: 'production',
-      enabled: false,
+      enabled: true,
       healthStatus: 'unknown',
     },
   });
