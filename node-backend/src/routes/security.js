@@ -1,7 +1,7 @@
 import express from 'express';
 import { body, param, query, validationResult } from 'express-validator';
 import { Op } from 'sequelize';
-import { ingestFinding } from '../services/securityEngine.js';
+import { ingestFinding, recomputeAssetHealth } from '../services/securityEngine.js';
 import { DETECTION_STACK, enrichFindingRecord } from '../services/findingIntelligence.js';
 import { recordScanRun } from '../services/scanRunLedger.js';
 import { TOOL_REGISTRY, getToolRegistryEntryByName } from '../services/toolRegistry.js';
@@ -1978,6 +1978,10 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         });
       }
 
+      if (finding.applicationAssetId) {
+        await recomputeAssetHealth(finding.applicationAssetId, { ApplicationAsset, SecurityFinding });
+      }
+
       return res.json(finding);
     },
   );
@@ -2040,6 +2044,10 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         manualConfirmed: true,
         manualConfirmedBy: req.user.username,
       });
+
+      if (finding.applicationAssetId) {
+        await recomputeAssetHealth(finding.applicationAssetId, { ApplicationAsset, SecurityFinding });
+      }
 
       await notifyTicket(ticket, 'created');
       return res.status(201).json({ findingId: finding.id, ticketId: ticket.id });

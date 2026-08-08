@@ -48,5 +48,11 @@ export default (sequelize) => {
     // by city, not raw IP — a home ISP reassigning a dynamic IP within the
     // same city would otherwise trigger a false alarm on every login.
     knownLoginGeos: { type: DataTypes.JSON, allowNull: false, defaultValue: [] },
+    address: { type: DataTypes.STRING(255), allowNull: true },
+    // A data: URL, not a file path — this app has no object-storage
+    // integration (S3/R2/etc.) yet, so the image is stored inline rather
+    // than inventing new infra for one field. Capped client- and
+    // server-side (see the profile route) to keep row size reasonable.
+    profilePictureUrl: { type: DataTypes.TEXT, allowNull: true },
   });
 };

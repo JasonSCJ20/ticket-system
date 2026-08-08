@@ -231,6 +231,8 @@ export const initModels = async () => {
     await ensureColumn('Users', 'lastTelegramReadAt', { type: DataTypes.DATE, allowNull: true });
     await ensureColumn('Users', 'lastSeenGeo', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'knownLoginGeos', { type: DataTypes.JSON, allowNull: false, defaultValue: [] });
+    await ensureColumn('Users', 'address', { type: DataTypes.STRING(255), allowNull: true });
+    await ensureColumn('Users', 'profilePictureUrl', { type: DataTypes.TEXT, allowNull: true });
     await ensureColumn('Users', 'mfaEnabled', { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false });
     await ensureColumn('Users', 'mfaSecret', { type: DataTypes.STRING(128), allowNull: true });
     await ensureColumn('Users', 'resetPasswordCode', { type: DataTypes.STRING(16), allowNull: true });

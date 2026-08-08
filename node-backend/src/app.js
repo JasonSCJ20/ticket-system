@@ -1659,6 +1659,10 @@ async function setup() {
       telegramId: user.telegramId,
       telegramNumber: user.telegramNumber || null,
       telegramChatId: user.telegramChatId || null,
+      address: user.address || null,
+      profilePictureUrl: user.profilePictureUrl || null,
+      notifyTelegram: Boolean(user.notifyTelegram),
+      notifyEmail: Boolean(user.notifyEmail),
       mfaEnabled: Boolean(user.mfaEnabled),
       profileCompletionRequired: !profileState.isComplete,
       profileCompletionIssues: profileState.issues,
@@ -1682,15 +1686,27 @@ async function setup() {
     res.json({ ok: true });
   });
 
+  // Partial-update semantics throughout: the Profile page saves contact
+  // details, Settings saves role/notification preferences, and each must
+  // be able to save independently without clobbering fields the other
+  // page owns — every field here is genuinely optional, and anything not
+  // present in the request body keeps its existing stored value.
   app.patch(
     '/api/me/profile',
     authMiddleware,
     protectedApiLimiter,
     body('telegramNumber').optional({ nullable: true }).isString().trim().isLength({ min: 8, max: 32 }),
     body('telegramChatId').optional({ nullable: true }).isString().trim().matches(/^-?\d{5,32}$/),
-    body('audienceCode').isString().trim().isIn(['STAFF', 'TJN', 'GJN', 'BJN', 'DGSN']),
+    body('audienceCode').optional().isString().trim().isIn(['STAFF', 'TJN', 'GJN', 'BJN', 'DGSN']),
     body('operationalTeams').optional({ nullable: true }).custom((value) => value === undefined || value === null || Array.isArray(value)),
     body('operationalTeams.*').optional().isString().trim(),
+    body('address').optional({ nullable: true }).isString().trim().isLength({ max: 255 }),
+    // A data: URL — cap comfortably above a reasonably-compressed small
+    // avatar (~300KB decoded) so this can't be used to stuff arbitrarily
+    // large blobs into the database one profile save at a time.
+    body('profilePictureUrl').optional({ nullable: true }).isString().isLength({ max: 400_000 }),
+    body('notifyTelegram').optional().isBoolean(),
+    body('notifyEmail').optional().isBoolean(),
     async (req, res) => {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
@@ -1698,40 +1714,51 @@ async function setup() {
       const user = await userModel.findByPk(req.user.sub);
       if (!user) return res.status(404).json({ error: 'User not found' });
 
-      const operationalTeams = normalizeOperationalTeams(req.body.operationalTeams);
-      const audienceCode = req.body.audienceCode.trim().toUpperCase();
-      const isOperationalStaff = isOperationalStaffAudience(audienceCode);
+      const hasField = (name) => Object.prototype.hasOwnProperty.call(req.body, name);
 
-      if (isOperationalStaff && (operationalTeams.length < 1 || operationalTeams.length > 2)) {
+      // "Effective" values merge what's being saved right now with what's
+      // already stored, so the staff-required checks below see the true
+      // resulting state rather than treating an omitted field as blank.
+      const effectiveAudienceCode = hasField('audienceCode') ? req.body.audienceCode.trim().toUpperCase() : String(user.audienceCode || '');
+      const effectiveTelegramNumber = hasField('telegramNumber') ? String(req.body.telegramNumber || '').trim() : String(user.telegramNumber || '');
+      const effectiveTelegramChatId = hasField('telegramChatId') ? String(req.body.telegramChatId || '').trim() : String(user.telegramChatId || '');
+      const effectiveOperationalTeams = hasField('operationalTeams') ? normalizeOperationalTeams(req.body.operationalTeams) : readUserOperationalTeams(user);
+      const isOperationalStaff = isOperationalStaffAudience(effectiveAudienceCode);
+
+      if (isOperationalStaff && (effectiveOperationalTeams.length < 1 || effectiveOperationalTeams.length > 2)) {
         return res.status(422).json({ error: 'Select one or two operational teams' });
       }
-
-      if (isOperationalStaff && !String(req.body.telegramNumber || '').trim()) {
+      if (isOperationalStaff && !effectiveTelegramNumber) {
         return res.status(422).json({ error: 'Telegram phone number is required for operational staff' });
       }
-
-      if (isOperationalStaff && !String(req.body.telegramChatId || '').trim()) {
+      if (isOperationalStaff && !effectiveTelegramChatId) {
         return res.status(422).json({ error: 'Telegram chat ID is required for operational staff' });
       }
 
-      // Telegram delivery applies to every role, not just operational staff —
-      // a manager/executive/stakeholder setting their own chat ID is exactly
-      // how they'd receive escalation and downtime alerts. Only staff are
-      // *required* to set it (enforced above); everyone else's value, if
-      // provided, must actually be saved rather than silently discarded.
-      await user.update({
-        telegramNumber: String(req.body.telegramNumber || '').trim() || null,
-        telegramChatId: String(req.body.telegramChatId || '').trim() || null,
-        audienceCode,
-        operationalTeams: isOperationalStaff ? operationalTeams : [],
-        department: isOperationalStaff
-          ? (operationalTeams.includes('Network')
+      const updates = {};
+      if (hasField('telegramNumber')) updates.telegramNumber = effectiveTelegramNumber || null;
+      if (hasField('telegramChatId')) updates.telegramChatId = effectiveTelegramChatId || null;
+      if (hasField('address')) updates.address = String(req.body.address || '').trim() || null;
+      if (hasField('profilePictureUrl')) updates.profilePictureUrl = req.body.profilePictureUrl || null;
+      if (hasField('notifyTelegram')) updates.notifyTelegram = req.body.notifyTelegram;
+      if (hasField('notifyEmail')) updates.notifyEmail = req.body.notifyEmail;
+      if (hasField('audienceCode')) {
+        updates.audienceCode = effectiveAudienceCode;
+        updates.operationalTeams = isOperationalStaff ? effectiveOperationalTeams : [];
+        updates.department = isOperationalStaff
+          ? (effectiveOperationalTeams.includes('Network')
               ? 'Networks'
-              : operationalTeams.includes('Developer')
+              : effectiveOperationalTeams.includes('Developer')
                 ? 'Dev'
                 : 'Hardware')
-          : null,
-      });
+          : null;
+      } else if (hasField('operationalTeams') && isOperationalStaff) {
+        // audienceCode itself wasn't resent, but the teams were — keep them
+        // in sync without requiring the caller to resend every field.
+        updates.operationalTeams = effectiveOperationalTeams;
+      }
+
+      await user.update(updates);
 
       const profileState = getProfileCompletionState(user);
       const newJti = randomUUID();
@@ -1756,6 +1783,10 @@ async function setup() {
         audienceLabel: profileState.audienceLabel,
         telegramNumber: user.telegramNumber,
         telegramChatId: user.telegramChatId,
+        address: user.address,
+        profilePictureUrl: user.profilePictureUrl,
+        notifyTelegram: Boolean(user.notifyTelegram),
+        notifyEmail: Boolean(user.notifyEmail),
         profileCompletionRequired: !profileState.isComplete,
         profileCompletionIssues: profileState.issues,
         access_token: refreshedToken,

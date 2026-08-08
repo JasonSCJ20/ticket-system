@@ -100,10 +100,31 @@ async function resolveCommandCentrePlatformAsset(ApplicationAsset) {
   return app;
 }
 
-function healthFromFindings(findingSeverities) {
+function healthFromSeverities(findingSeverities) {
   if (findingSeverities.includes('critical')) return 'critical';
   if (findingSeverities.includes('high') || findingSeverities.includes('medium')) return 'degraded';
   return 'healthy';
+}
+
+// The health badge shown for an asset must reflect what's actually true
+// right now, not just whatever the most recently ingested finding happened
+// to be — the previous version set healthStatus to a single new finding's
+// severity, which meant an asset could show "degraded" indefinitely from a
+// finding that had since been remediated or dismissed, while a genuinely
+// still-open critical issue from further back went unrepresented. This
+// queries every currently-open finding for the asset and derives health
+// from that real, complete picture, called after any create OR any status
+// change (remediate/dismiss/reopen) — anywhere a finding's open/closed
+// state changes, this needs to run again.
+export async function recomputeAssetHealth(applicationAssetId, { ApplicationAsset, SecurityFinding }) {
+  const openFindings = await SecurityFinding.findAll({
+    where: { applicationAssetId, status: { [Op.in]: ['new', 'investigating'] } },
+    attributes: ['severity'],
+    raw: true,
+  });
+  const health = healthFromSeverities(openFindings.map((f) => f.severity));
+  await ApplicationAsset.update({ healthStatus: health }, { where: { id: applicationAssetId } });
+  return health;
 }
 
 function computeFingerprint(payload) {
@@ -273,10 +294,10 @@ export async function ingestFinding({
   });
 
   await app.update({
-    healthStatus: healthFromFindings([normalizedSeverity]),
     lastPassiveScanAt: detectionMode === 'passive' ? new Date() : app.lastPassiveScanAt,
     lastActiveScanAt: detectionMode === 'active' ? new Date() : app.lastActiveScanAt,
   });
+  await recomputeAssetHealth(app.id, { ApplicationAsset, SecurityFinding });
 
   if (!manualRequired) {
     await autoCreateTicketForFinding({ finding, app, models, notifyTicket });
