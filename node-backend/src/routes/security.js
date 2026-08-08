@@ -4,7 +4,7 @@ import { Op } from 'sequelize';
 import { ingestFinding } from '../services/securityEngine.js';
 import { DETECTION_STACK, enrichFindingRecord } from '../services/findingIntelligence.js';
 import { recordScanRun } from '../services/scanRunLedger.js';
-import { TOOL_REGISTRY, getToolRegistryEntryByName, getToolSchedulerState } from '../services/toolRegistry.js';
+import { TOOL_REGISTRY, getToolRegistryEntryByName } from '../services/toolRegistry.js';
 import { getLiveFeed, getThreatOrigins, getReconDetections } from '../services/socLiveFeed.js';
 import { probeApplicationRuntime } from '../services/livenessProbe.js';
 
@@ -2075,8 +2075,39 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     return res.json({ generatedAt: new Date().toISOString(), scannerCount: detections.length, detections });
   });
 
+  // Was reading from an in-memory tracker (getToolSchedulerState) that only
+  // a narrow webhook-ingestion code path in app.js ever wrote to — real
+  // self-scans (Trivy/Gitleaks/Semgrep/Nuclei, run from securityEngine.js)
+  // never touched it at all, and being in-memory, it reset to empty on
+  // every server restart regardless. The result: this card kept reporting
+  // "Not running yet" for tools that had genuinely just run and produced
+  // real findings, because it was looking in the wrong place. Now reads
+  // the same real ScanRunRecord table every other tool-status view uses.
   router.get('/soc/scheduler-state', analystOrAdmin, async (_req, res) => {
-    const state = getToolSchedulerState();
+    const scanRuns = await ScanRunRecord.findAll({
+      attributes: ['toolId', 'status', 'completedAt', 'startedAt', 'createdAt'],
+      raw: true,
+    });
+
+    const byTool = scanRuns.reduce((acc, run) => {
+      // 'skipped' means the tool has no real execution path yet (no
+      // inbound connector configured, or genuinely not implemented) — that
+      // is accurately "not running yet", not a run to count or judge.
+      if (!run.toolId || run.status === 'skipped') return acc;
+      if (!acc[run.toolId]) acc[run.toolId] = { totalRuns: 0, successCount: 0, failureCount: 0, lastSuccessAt: null, lastFailureAt: null };
+      const bucket = acc[run.toolId];
+      const at = run.completedAt || run.startedAt || run.createdAt;
+      bucket.totalRuns += 1;
+      if (run.status === 'completed') {
+        bucket.successCount += 1;
+        if (!bucket.lastSuccessAt || new Date(at) > new Date(bucket.lastSuccessAt)) bucket.lastSuccessAt = at;
+      } else if (run.status === 'failed') {
+        bucket.failureCount += 1;
+        if (!bucket.lastFailureAt || new Date(at) > new Date(bucket.lastFailureAt)) bucket.lastFailureAt = at;
+      }
+      return acc;
+    }, {});
+
     const toolsWithState = TOOL_REGISTRY.map((tool) => ({
       id: tool.id,
       name: tool.name,
@@ -2085,7 +2116,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
       cadenceMinutes: tool.cadenceMinutes || null,
       mode: tool.mode,
       domain: tool.domain,
-      ...(state[tool.id] || { totalRuns: 0, successCount: 0, failureCount: 0, lastSuccessAt: null, lastFailureAt: null }),
+      ...(byTool[tool.id] || { totalRuns: 0, successCount: 0, failureCount: 0, lastSuccessAt: null, lastFailureAt: null }),
     }));
     return res.json({ generatedAt: new Date().toISOString(), state: toolsWithState });
   });
