@@ -38,7 +38,13 @@ export function createSemgrepScanner({
         line: result.start?.line,
         severity: SEVERITY_MAP[result.extra?.severity] || 'medium',
         message: result.extra?.message,
-        cweId: result.extra?.metadata?.cwe?.[0] || null,
+        // Semgrep's cwe metadata is a full descriptive string (e.g.
+        // "CWE-79: Improper Neutralization of Input During Web Page
+        // Generation ('Cross-site Scripting')"), not a bare id — extract
+        // just the "CWE-NNN" prefix, since SecurityFindings.cweId is
+        // STRING(32) and every real Semgrep finding was silently failing
+        // to save with a Postgres "value too long" error otherwise.
+        cweId: result.extra?.metadata?.cwe?.[0]?.match(/^CWE-\d+/)?.[0] || null,
       }));
     } finally {
       await cleanupReportFile(reportPath);

@@ -31,6 +31,13 @@ export function createGitleaksScanner({
         '--report-path', reportPath,
         '--exit-code', '0',
         '--no-banner',
+        // sourcePath is a deployed source snapshot (the Docker image only
+        // COPYs src/, never .git) — this was never a git checkout to begin
+        // with, so scanning it in git mode always failed trying to shell
+        // out to a "git" binary that doesn't exist in the image either way.
+        // --no-git treats it as a plain directory scan, which is what this
+        // actually is.
+        '--no-git',
       ]);
       const raw = await readReportFile(reportPath);
       const leaks = raw.trim() ? JSON.parse(raw) : [];
