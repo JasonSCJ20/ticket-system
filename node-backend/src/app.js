@@ -1,5 +1,14 @@
 // Import Express framework for building the API
 import express from 'express';
+// Express 4 never catches a rejected promise inside an async route
+// handler — without this, roughly 87% of this codebase's route handlers
+// (everything relying on try/catch alone, which is most of them) would
+// leave the request hanging forever on an unexpected error instead of
+// ever reaching an error response. Patches express's router methods so
+// an async handler's rejection is forwarded to next(err) automatically,
+// same as a synchronous throw already is. Must be imported before any
+// route is registered.
+import 'express-async-errors';
 // Import CORS middleware for cross-origin requests
 import cors from 'cors';
 // Import Helmet for security headers
@@ -48,6 +57,7 @@ import { recordToolSchedulerRun } from './services/toolRegistry.js';
 import { createDeviceProbe } from './services/scanners/deviceProbe.js';
 import { verifyAuditChain } from './services/auditChain.js';
 import { logger, requestLoggingMiddleware } from './logger.js';
+import { createErrorHandler } from './services/errorHandler.js';
 import { createNotificationThrottle } from './services/notificationThrottle.js';
 import { runWithOrganization, runAsPlatformAdmin } from './services/tenantContext.js';
 import { buildAssignment5W1H, buildAssignmentGuidance, buildAssignmentMessage, buildResolutionReport, detectAssignmentDomain } from './services/ticketAssist.js';
@@ -1921,6 +1931,9 @@ async function setup() {
     })));
   });
 
+  // Must stay the last app.use() call — see services/errorHandler.js for
+  // why this needs to be registered after every route.
+  app.use(createErrorHandler(logger));
 }
 
 // Export the express app for testing
