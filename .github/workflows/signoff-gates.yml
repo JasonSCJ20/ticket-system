@@ -60,6 +60,11 @@ jobs:
           cd frontend-v2
           npm ci
 
+      - name: Run frontend tests
+        run: |
+          cd frontend-v2
+          npm test
+
       - name: Build frontend
         run: |
           cd frontend-v2
