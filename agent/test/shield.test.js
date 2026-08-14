@@ -38,8 +38,16 @@ async function login() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD }),
   });
-  const body = await res.json();
-  return body.access_token;
+  // The token now comes back only as an httpOnly cookie (see
+  // node-backend/src/services/authCookie.js), not in the JSON body — pull
+  // the raw JWT value back out so it can still be sent as a normal
+  // Authorization header below (authMiddleware accepts either transport).
+  const setCookie = typeof res.headers.getSetCookie === 'function'
+    ? res.headers.getSetCookie()
+    : [res.headers.get('set-cookie')].filter(Boolean);
+  const authCookie = setCookie.find((line) => line.startsWith('access_token='));
+  if (!authCookie) return null;
+  return decodeURIComponent(authCookie.split(';')[0].split('=').slice(1).join('='));
 }
 
 beforeAll(async () => {
