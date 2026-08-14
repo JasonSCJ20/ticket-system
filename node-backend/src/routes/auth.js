@@ -53,6 +53,7 @@ export default function authRouteFactory({
   consumeAuthAttempt,
   clearAuthAttemptState,
   writePublicAudit,
+  AuditLog,
   sendEmailNotification,
   runAsPlatformAdmin,
   defaultOrganizationId,
@@ -148,6 +149,13 @@ export default function authRouteFactory({
         });
 
         const profileState = getProfileCompletionState(created);
+
+        await writePublicAudit(req, {
+          entityType: 'user',
+          entityId: created.id,
+          action: 'auth.account_registered',
+          details: JSON.stringify({ username, email, audienceCode }),
+        });
 
         return res.status(201).json({
           id: created.id,
@@ -561,6 +569,16 @@ export default function authRouteFactory({
         mustChangePassword: false,
       });
 
+      await AuditLog.create({
+        entityType: 'user',
+        entityId: String(user.id),
+        actor: req.user?.username || 'unknown',
+        actorRole: req.user?.role || null,
+        action: 'auth.password_changed',
+        ipAddress: req.ip,
+        details: null,
+      });
+
       return res.json({ ok: true, message: 'Password changed successfully.' });
     },
   );
@@ -616,6 +634,17 @@ export default function authRouteFactory({
       if (!ok) return res.status(400).json({ error: 'Invalid MFA code' });
 
       await user.update({ mfaEnabled: true });
+
+      await AuditLog.create({
+        entityType: 'user',
+        entityId: String(user.id),
+        actor: req.user?.username || 'unknown',
+        actorRole: req.user?.role || null,
+        action: 'auth.mfa_enabled',
+        ipAddress: req.ip,
+        details: null,
+      });
+
       return res.json({ ok: true, mfaEnabled: true });
     },
   );
@@ -642,6 +671,21 @@ export default function authRouteFactory({
       if (!ok) return res.status(400).json({ error: 'Invalid MFA code' });
 
       await user.update({ mfaEnabled: false, mfaSecret: null });
+
+      // Turning OFF a security control is worth logging at least as much
+      // as turning it on — this is exactly the kind of action an attacker
+      // who compromised a session would take to make follow-up access
+      // easier.
+      await AuditLog.create({
+        entityType: 'user',
+        entityId: String(user.id),
+        actor: req.user?.username || 'unknown',
+        actorRole: req.user?.role || null,
+        action: 'auth.mfa_disabled',
+        ipAddress: req.ip,
+        details: null,
+      });
+
       return res.json({ ok: true, mfaEnabled: false });
     },
   );

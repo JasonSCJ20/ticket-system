@@ -1320,7 +1320,7 @@ async function setup() {
   };
 
   // Mount user routes with auth middleware; write operations are restricted inside route handlers.
-  app.use('/api/users', authMiddleware, protectedApiLimiter, requireCompletedProfile, usersRouteFactory({ User: userModel }));
+  app.use('/api/users', authMiddleware, protectedApiLimiter, requireCompletedProfile, usersRouteFactory({ User: userModel, AuditLog: auditLogModel }));
   // Mount ticket routes with auth middleware
   app.use(
     '/api/tickets',
@@ -1617,6 +1617,7 @@ async function setup() {
     consumeAuthAttempt,
     clearAuthAttemptState,
     writePublicAudit,
+    AuditLog: auditLogModel,
     sendEmailNotification,
     runAsPlatformAdmin,
     defaultOrganizationId: defaultOrganization.id,

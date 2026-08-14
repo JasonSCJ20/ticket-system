@@ -147,6 +147,12 @@ describe('Full onboarding lifecycle: create org, issue admin, forced password ch
       .send({ currentPassword: knownTempPassword, newPassword: 'A-Real-New-Password-1!' });
     expect(changeResult.status).toBe(200);
 
+    // Password changes previously left zero audit trail.
+    const changeAudit = await runAsPlatformAdmin(() => sequelize.models.AuditLog.findOne({
+      where: { action: 'auth.password_changed', actor: 'Lifecycle Admin' },
+    }));
+    expect(changeAudit).toBeTruthy();
+
     // Same token, now unblocked — mustChangePassword was cleared server-side.
     const unblocked = await request(app)
       .get('/api/users')

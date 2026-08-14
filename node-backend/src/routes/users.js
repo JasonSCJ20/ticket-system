@@ -77,7 +77,7 @@ const toSafeUser = (user) => ({
 // Export factory function that takes models as parameter
 export default (models) => {
   // Destructure User model
-  const { User } = models;
+  const { User, AuditLog } = models;
   const adminOnly = (req, res, next) => {
     if (req.user?.role === 'admin') return next();
     return res.status(403).json({ error: 'Insufficient permissions' });
@@ -140,6 +140,20 @@ export default (models) => {
       // Create user in database
       try {
         const user = await User.create(data);
+
+        // An admin creating another account — worth logging on its own,
+        // and especially so since this endpoint can assign any role,
+        // including admin itself.
+        await AuditLog.create({
+          entityType: 'user',
+          entityId: String(user.id),
+          actor: req.user?.username || 'unknown',
+          actorRole: req.user?.role || null,
+          action: 'user.created_by_admin',
+          ipAddress: req.ip,
+          details: JSON.stringify({ email: data.email, role: data.role, department: data.department }),
+        });
+
         // Return created user with 201 status, excluding credential/secret fields
         res.status(201).json(toSafeUser(user));
       } catch (err) {

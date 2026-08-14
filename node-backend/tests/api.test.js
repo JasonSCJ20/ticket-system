@@ -94,6 +94,14 @@ describe('Registration Policy', () => {
     expect(res.body.surname).toBe('Doe');
     expect(res.body.scjId).toBe('00361031-00803');
 
+    // Registration previously left zero audit trail — confirm the new
+    // entry actually lands, not just that the endpoint still works.
+    const registrationAudit = await runAsPlatformAdmin(() => sequelize.models.AuditLog.findOne({
+      where: { entityId: String(res.body.id), action: 'auth.account_registered' },
+    }));
+    expect(registrationAudit).toBeTruthy();
+    expect(registrationAudit.actor).toBe('public');
+
     const loginRes = await request(app)
       .post('/api/token')
       .send({ username: 'Jane Doe', password: 'StrongPassword1!' });
@@ -165,6 +173,14 @@ describe('Users', () => {
     expect(res.status).toBe(201);
     expect(res.body.name).toBe('testuser_jest');
     expect(res.body.scjId).toBe('00361031-09999');
+
+    // This endpoint can assign any role, including admin — previously had
+    // zero audit trail. Confirm the real actor (not "public") is recorded.
+    const creationAudit = await runAsPlatformAdmin(() => sequelize.models.AuditLog.findOne({
+      where: { entityId: String(res.body.id), action: 'user.created_by_admin' },
+    }));
+    expect(creationAudit).toBeTruthy();
+    expect(creationAudit.actorRole).toBe('admin');
   });
 
   it('lists users as admin', async () => {
