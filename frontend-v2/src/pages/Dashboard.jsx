@@ -1,6 +1,6 @@
 import { useApi } from '../hooks/useApi.js';
 import { fetchFortressPosture, fetchApplications, fetchNetworkDevices, fetchDatabaseAssets, fetchFindings } from '../api/security.js';
-import { Card, ErrorState, StatCard, StatCardRow } from '../components/ui.jsx';
+import { Card, ErrorState, StatCard, StatCardRow, StatusDot } from '../components/ui.jsx';
 
 const CONTROL_LABELS = {
   identity: 'Sign-in and access control',
@@ -122,9 +122,12 @@ export default function Dashboard() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
             {priorityFindings.slice(0, 5).map((f) => (
               <div key={f.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 12 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: f.severity === 'critical' ? 'var(--danger)' : 'var(--warning)', marginTop: 6, flexShrink: 0 }} />
+                <StatusDot tone={f.severity === 'critical' ? 'danger' : 'warning'} style={{ marginTop: 6 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <p style={{ fontSize: 14, margin: 0 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: f.severity === 'critical' ? 'var(--danger)' : 'var(--warning)', marginRight: 6 }}>
+                      {f.severity === 'critical' ? 'Critical' : 'Warning'}
+                    </span>
                     {f.title} <span style={{ color: 'var(--text-muted)' }}>on {f.application?.name || 'Unknown asset'}</span>
                   </p>
                   {f.remediationRecommendation && <p style={{ fontSize: 13, color: 'var(--text-muted)', margin: '2px 0 0' }}>{f.remediationRecommendation}</p>}

@@ -224,7 +224,15 @@ export default function Findings() {
               {visible.map((f) => (
                 <div
                   key={f.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setSelected(f)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelected(f);
+                    }
+                  }}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -233,6 +241,7 @@ export default function Findings() {
                     borderTop: '1px solid var(--border)',
                     cursor: 'pointer',
                     background: selected?.id === f.id ? 'var(--accent-soft)' : 'transparent',
+                    borderRadius: 'var(--radius)',
                   }}
                 >
                   <StatusDot tone={SEVERITY_TONE[f.severity] || 'muted'} />

@@ -79,18 +79,18 @@ export default function Assets() {
         {showForm && (
           <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 8 }}>
-              <input placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} />
-              <select value={form.assetType} onChange={(e) => setForm({ ...form, assetType: e.target.value })} style={inputStyle}>
+              <input aria-label="Name" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle} />
+              <select aria-label="Asset type" value={form.assetType} onChange={(e) => setForm({ ...form, assetType: e.target.value })} style={inputStyle}>
                 {ASSET_TYPE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
-              <input placeholder="Base URL (https://...) — for applications" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} style={inputStyle} />
-              <input placeholder="IP address — for servers/computers/routers" value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} style={inputStyle} />
-              <select value={form.environment} onChange={(e) => setForm({ ...form, environment: e.target.value })} style={inputStyle}>
+              <input aria-label="Base URL — for applications" placeholder="Base URL (https://...) — for applications" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} style={inputStyle} />
+              <input aria-label="IP address — for servers, computers, or routers" placeholder="IP address — for servers/computers/routers" value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} style={inputStyle} />
+              <select aria-label="Environment" value={form.environment} onChange={(e) => setForm({ ...form, environment: e.target.value })} style={inputStyle}>
                 <option value="production">production</option>
                 <option value="staging">staging</option>
                 <option value="development">development</option>
               </select>
-              <input placeholder="Owner email (optional)" value={form.ownerEmail} onChange={(e) => setForm({ ...form, ownerEmail: e.target.value })} style={inputStyle} />
+              <input aria-label="Owner email (optional)" placeholder="Owner email (optional)" value={form.ownerEmail} onChange={(e) => setForm({ ...form, ownerEmail: e.target.value })} style={inputStyle} />
             </div>
             <p style={{ fontSize: 10.5, color: 'var(--text-muted)', margin: '0 0 8px' }}>Provide at least a base URL or an IP address.</p>
             <button

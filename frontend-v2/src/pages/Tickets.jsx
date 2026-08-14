@@ -1,9 +1,20 @@
 import { useState, useMemo } from 'react';
 import { useApi } from '../hooks/useApi.js';
 import { fetchTickets } from '../api/tickets.js';
-import { Card, ErrorState, StatCard, StatCardRow, Chip } from '../components/ui.jsx';
+import { Card, ErrorState, StatCard, StatCardRow, Chip, StatusDot } from '../components/ui.jsx';
 import LifecycleStrip from '../components/LifecycleStrip.jsx';
 import TicketDetail from './TicketDetail.jsx';
+
+// Ticket priority was previously shown as a color-only dot with no text
+// anywhere in the row — invisible information for colorblind users, and
+// genuinely absent (not just decorative) for everyone else since no other
+// part of the row named the priority at all.
+const PRIORITY_LABEL = { critical: 'Critical', high: 'High', medium: 'Medium', low: 'Low' };
+function priorityTone(priority) {
+  if (priority === 'critical' || priority === 'high') return 'danger';
+  if (priority === 'medium') return 'warning';
+  return 'muted';
+}
 
 function slaLabel(t) {
   if (!t.slaDueAt) return null;
@@ -58,7 +69,15 @@ export default function Tickets() {
                 return (
                   <div
                     key={t.id}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setSelected(t)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelected(t);
+                      }
+                    }}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
@@ -70,10 +89,13 @@ export default function Tickets() {
                       borderRadius: 'var(--radius)',
                     }}
                   >
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: t.priority === 'critical' || t.priority === 'high' ? 'var(--danger)' : t.priority === 'medium' ? 'var(--warning)' : 'var(--text-muted)', flexShrink: 0 }} />
+                    <StatusDot tone={priorityTone(t.priority)} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <p style={{ fontSize: 14, margin: 0 }}>{t.title}</p>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: `var(--${priorityTone(t.priority) === 'muted' ? 'text-muted' : priorityTone(t.priority)})` }}>
+                          {PRIORITY_LABEL[t.priority] || t.priority}
+                        </span>
                         {(t.assets || []).map((a) => <Chip key={a.id}>{a.assetName}</Chip>)}
                         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t.assignee ? `${t.assignee.name || ''} ${t.assignee.surname || ''}`.trim() : 'Unassigned'}</span>
                       </div>

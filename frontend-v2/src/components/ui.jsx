@@ -60,8 +60,21 @@ const STATUS_DOT_COLORS = {
 // A single colored dot used as the leading glance-indicator on list rows
 // (assets, findings, tickets) — one shared shape so "healthy vs needs
 // attention vs down" reads identically everywhere in the app.
-export function StatusDot({ tone = 'muted', size = 8 }) {
-  return <span style={{ display: 'inline-block', width: size, height: size, borderRadius: '50%', background: STATUS_DOT_COLORS[tone] || STATUS_DOT_COLORS.muted, flexShrink: 0 }} />;
+//
+// `label`, when passed, makes this dot an accessible glance-indicator
+// instead of a color-only one — role="img" so screen readers announce it
+// (a bare <span> has no implicit role, so aria-label alone is unreliable
+// here). Callers that already show the same word as visible text nearby
+// can safely omit it — that's not a color-only signal, just a redundant
+// decoration, and doesn't need announcing twice.
+export function StatusDot({ tone = 'muted', size = 8, label, style }) {
+  return (
+    <span
+      role={label ? 'img' : undefined}
+      aria-label={label}
+      style={{ display: 'inline-block', width: size, height: size, borderRadius: '50%', background: STATUS_DOT_COLORS[tone] || STATUS_DOT_COLORS.muted, flexShrink: 0, ...style }}
+    />
+  );
 }
 
 // A small tag naming a real entity (an asset, a team) — used wherever a row
