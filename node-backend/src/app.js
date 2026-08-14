@@ -30,7 +30,7 @@ import { CONFIG } from './config.js';
 // Import database models initialization
 import { initModels, sequelize } from './models/index.js';
 // Import Telegram bot functions
-import { bot, sendTelegramMessage, ticketText } from './telegram.js';
+import { sendTelegramMessage, ticketText } from './telegram.js';
 import { sendEmailNotification } from './mailer.js';
 // Import report functions
 import { sendMonthlyReport, monthlySummary, executiveReport, technicalReport } from './reports.js';

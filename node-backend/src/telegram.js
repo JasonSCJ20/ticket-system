@@ -1,21 +1,18 @@
-// Import Telegram Bot API
-import TelegramBot from 'node-telegram-bot-api';
 // Import configuration
 import { CONFIG } from './config.js';
 import { logger } from './logger.js';
-
-// Create the bot only when a token is configured so startup does not fail in environments without Telegram.
-export const bot = CONFIG.TELEGRAM_BOT_TOKEN
-  ? new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, { polling: false })
-  : null;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Function to send a message via Telegram bot
+// Talks to the Telegram Bot API directly over fetch. The only endpoint this
+// app ever calls is sendMessage (inbound webhook updates are read as plain
+// JSON in routes/webhooks.js, no SDK involved there either), so a client
+// library's dependency chain isn't earning its keep here — same
+// zero-dependency approach @commandcentre/agent already uses.
 export async function sendTelegramMessage(chatId, text, options = {}) {
-  if (!bot || !chatId) return false;
+  if (!CONFIG.TELEGRAM_BOT_TOKEN || !chatId) return false;
 
   const retries = Number.isInteger(options.retries) ? options.retries : 2;
   const sendOptions = { ...options };
@@ -23,8 +20,16 @@ export async function sendTelegramMessage(chatId, text, options = {}) {
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      await bot.sendMessage(chatId, text, sendOptions);
-      return true;
+      const res = await fetch(`https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text, ...sendOptions }),
+      });
+      const data = await res.json().catch(() => ({}));
+      // Telegram can return HTTP 200 with { ok: false, description } on
+      // some failures, so both the transport status and the body matter.
+      if (res.ok && data.ok) return true;
+      throw new Error(data.description || `Telegram API returned HTTP ${res.status}`);
     } catch (error) {
       const finalAttempt = attempt >= retries;
       logger.error({ err: error, chatId, attempt: attempt + 1 }, 'Telegram delivery failed');
