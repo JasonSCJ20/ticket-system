@@ -109,3 +109,34 @@ export async function request(path, { method = 'GET', body, skipAuthRedirect = f
   if (response.status === 204) return null;
   return response.json();
 }
+
+// Downloads a file response (reports, data exports) as a blob and saves it
+// via a temporary <a download> click — `request()` above always parses
+// JSON, so anything that returns a real file goes straight through fetch
+// with the same bearer-token auth header the rest of the app uses.
+export async function downloadFile(path, fallbackFilename) {
+  let response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      headers: { ...authHeaders() },
+    });
+  } catch {
+    throw new Error(`Unable to reach the API at ${API_URL}. Check the backend URL and CORS configuration.`);
+  }
+
+  if (!response.ok) await parseErrorResponse(response, `Failed to download ${path}`);
+
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([^"]+)"?/);
+  const filename = match ? match[1] : fallbackFilename;
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}

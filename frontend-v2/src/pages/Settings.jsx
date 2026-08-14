@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
-import { updateProfile, fetchMfaSetup, enableMfa, disableMfa } from '../api/auth.js';
+import { updateProfile, fetchMfaSetup, enableMfa, disableMfa, exportMyData, deleteMyAccount } from '../api/auth.js';
 import { setToken } from '../api/client.js';
 import { Card, Chip, FeedbackBanner } from '../components/ui.jsx';
 
@@ -41,7 +41,9 @@ function btnStyle(color, outline = true) {
 }
 
 export default function Settings() {
-  const { profile, setProfile } = useAuth();
+  const { profile, setProfile, logout } = useAuth();
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
   const [form, setForm] = useState({
     audienceCode: profile?.audienceCode || 'STAFF',
     telegramNumber: profile?.telegramNumber || '',
@@ -129,6 +131,32 @@ export default function Settings() {
     }
   };
 
+  const handleExportData = async () => {
+    setBusy(true);
+    clear();
+    try {
+      await exportMyData();
+      notifySuccess('Your data export has downloaded.');
+    } catch (err) {
+      notifyError(err, 'Failed to export your data.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!deletePassword.trim()) return;
+    setBusy(true);
+    clear();
+    try {
+      await deleteMyAccount(deletePassword.trim());
+      await logout();
+    } catch (err) {
+      notifyError(err, 'Failed to delete your account.');
+      setBusy(false);
+    }
+  };
+
   return (
     <div>
       <FeedbackBanner feedback={feedback} onDismiss={clear} />
@@ -186,6 +214,49 @@ export default function Settings() {
           <button disabled={busy} onClick={handleStartMfaSetup} style={btnStyle('var(--accent)', false)}>
             Set up MFA
           </button>
+        )}
+      </Card>
+
+      <Card title="Your data" style={{ padding: '1.25rem' }}>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0, marginBottom: 12 }}>
+          Download a copy of every piece of personal data CommandCentre holds about your account — your profile, the tickets you created or were assigned, your comments, patch tasks, and audit history.
+        </p>
+        <button disabled={busy} onClick={handleExportData} style={btnStyle('var(--accent)')}>
+          Export my data
+        </button>
+      </Card>
+
+      <Card title="Delete account" style={{ padding: '1.25rem' }}>
+        {!deleteConfirmOpen ? (
+          <>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 0, marginBottom: 12 }}>
+              Permanently delete your account. Your profile details are removed; tickets and security audit records you were involved in are kept for compliance but will no longer show your personal details.
+            </p>
+            <button disabled={busy} onClick={() => setDeleteConfirmOpen(true)} style={btnStyle('var(--danger)')}>
+              Delete my account
+            </button>
+          </>
+        ) : (
+          <div>
+            <p style={{ fontSize: 13, color: 'var(--danger)', marginTop: 0, marginBottom: 10, fontWeight: 500 }}>
+              This can't be undone. Enter your password to confirm.
+            </p>
+            <input
+              type="password"
+              placeholder="Current password"
+              value={deletePassword}
+              onChange={(e) => setDeletePassword(e.target.value)}
+              style={inputStyle}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button disabled={busy} onClick={handleDeleteAccount} style={btnStyle('var(--danger)', false)}>
+                Confirm deletion
+              </button>
+              <button disabled={busy} onClick={() => { setDeleteConfirmOpen(false); setDeletePassword(''); }} style={btnStyle('var(--text-muted)')}>
+                Cancel
+              </button>
+            </div>
+          </div>
         )}
       </Card>
     </div>

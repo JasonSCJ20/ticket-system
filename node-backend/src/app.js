@@ -1675,6 +1675,156 @@ async function setup() {
     });
   });
 
+  // Self-service GDPR-style export — every place this user's own data lives
+  // across the schema. Credential fields (password hash, MFA secret, reset
+  // codes) are deliberately excluded: they're security material, not data
+  // the user is meaningfully entitled to receive back.
+  app.get('/api/me/export', authMiddleware, protectedApiLimiter, async (req, res) => {
+    const user = await userModel.findByPk(req.user.sub);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    // AuditLog.actor, TicketComment.authorName, and PatchTask.createdBy are
+    // all denormalized string snapshots (not FKs) written from this same
+    // value at the time of the action — see routes/tickets.js's
+    // scopedActor() and the actor: req.user?.username fallback used
+    // throughout routes/auth.js, routes/security.js, etc.
+    const identity = user.username || user.name;
+
+    const [ticketsCreated, ticketsAssigned, ticketComments, patchTasksCreated, auditLogEntries, notifications] = await Promise.all([
+      ticketModel.findAll({ where: { creatorId: user.id } }),
+      user.scjId ? ticketModel.findAll({ where: { assigneeId: user.scjId } }) : Promise.resolve([]),
+      ticketCommentModel.findAll({ where: { authorName: identity } }),
+      patchTaskModel.findAll({ where: { createdBy: identity } }),
+      auditLogModel.findAll({ where: { actor: identity }, order: [['createdAt', 'ASC']] }),
+      notificationLedgerModel.findAll({ where: { userId: user.id } }),
+    ]);
+
+    await auditLogModel.create({
+      entityType: 'user',
+      entityId: String(user.id),
+      actor: identity,
+      actorRole: req.user?.role || null,
+      action: 'user.data_exported',
+      ipAddress: req.ip,
+      details: null,
+    });
+
+    res.json({
+      exportedAt: new Date().toISOString(),
+      profile: {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        surname: user.surname,
+        department: user.department,
+        operationalTeams: user.operationalTeams,
+        audienceCode: user.audienceCode,
+        jobTitle: user.jobTitle,
+        scjId: user.scjId,
+        email: user.email,
+        telegramNumber: user.telegramNumber,
+        telegramChatId: user.telegramChatId,
+        telegramId: user.telegramId,
+        role: user.role,
+        address: user.address,
+        profilePictureUrl: user.profilePictureUrl,
+        notifyTelegram: user.notifyTelegram,
+        notifyEmail: user.notifyEmail,
+        mfaEnabled: user.mfaEnabled,
+        lastLoginAt: user.lastLoginAt,
+        lastLoginIp: user.lastLoginIp,
+        lastSeenAt: user.lastSeenAt,
+        lastSeenIp: user.lastSeenIp,
+        lastSeenUserAgent: user.lastSeenUserAgent,
+        lastSeenGeo: user.lastSeenGeo,
+        knownLoginGeos: user.knownLoginGeos,
+        createdAt: user.createdAt,
+      },
+      ticketsCreated,
+      ticketsAssigned,
+      ticketComments,
+      patchTasksCreated,
+      auditLogEntries,
+      notifications,
+      excludedFromExport: 'Credential fields (password hash, MFA secret, password-reset codes) are intentionally excluded.',
+    });
+  });
+
+  // Self-service account deletion. This anonymizes the user's own directly
+  // identifying profile fields and disables the account rather than hard
+  // deleting the row: Tickets reference this user by scjId/id, and AuditLog
+  // is a hash-chained tamper-evident record (see models/auditLog.js) that
+  // Scratch Solid Solutions has a legitimate security/compliance interest in
+  // retaining intact — GDPR Art. 17(3) carves out exactly this case. Only
+  // the account's own PII is scrubbed; historical ticket/audit records that
+  // mention this identity elsewhere are left as-is.
+  app.delete(
+    '/api/me',
+    authMiddleware,
+    protectedApiLimiter,
+    body('currentPassword').isString(),
+    async (req, res) => {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) return res.status(422).json({ errors: errors.array() });
+
+      const user = await userModel.findByPk(req.user.sub);
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      if (!user.password_hash || !bcrypt.compareSync(req.body.currentPassword, user.password_hash)) {
+        return res.status(401).json({ error: 'Current password is incorrect' });
+      }
+
+      if (user.role === 'admin') {
+        const otherAdmins = await userModel.count({ where: { role: 'admin', id: { [Op.ne]: user.id } } });
+        if (otherAdmins === 0) {
+          return res.status(409).json({ error: 'You are the only admin for this organization. Promote another user to admin before deleting your account.' });
+        }
+      }
+
+      const identity = user.username || user.name;
+
+      await auditLogModel.create({
+        entityType: 'user',
+        entityId: String(user.id),
+        actor: identity,
+        actorRole: req.user?.role || null,
+        action: 'user.self_deleted',
+        ipAddress: req.ip,
+        details: null,
+      });
+
+      await user.update({
+        name: 'Deleted user',
+        surname: null,
+        username: null,
+        email: null,
+        telegramNumber: null,
+        telegramChatId: null,
+        telegramId: null,
+        address: null,
+        profilePictureUrl: null,
+        password_hash: null,
+        mfaEnabled: false,
+        mfaSecret: null,
+        resetPasswordCode: null,
+        resetPasswordCodeExpiresAt: null,
+        notifyTelegram: false,
+        notifyEmail: false,
+        isOnline: false,
+        lastLoginIp: null,
+        lastSeenIp: null,
+        lastSeenUserAgent: null,
+        lastSeenGeo: null,
+        knownLoginGeos: [],
+      });
+
+      const exp = req.user?.exp ? new Date(req.user.exp * 1000) : null;
+      await revokeTokenJti(req.user?.jti, exp);
+
+      return res.json({ ok: true, message: 'Your account has been deleted. Tickets and security audit records you were involved in are retained for security compliance but no longer show your personal details.' });
+    },
+  );
+
   // Lightweight heartbeat — keeps isOnline accurate between full page refreshes
   app.post('/api/heartbeat', authMiddleware, protectedApiLimiter, async (req, res) => {
     const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim()) || req.ip || null;

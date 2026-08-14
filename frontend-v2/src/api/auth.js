@@ -1,4 +1,4 @@
-import { request, setToken, clearToken } from './client.js';
+import { request, setToken, clearToken, downloadFile } from './client.js';
 
 export async function login(username, password, mfaCode = '') {
   const normalizedUsername = String(username || '').trim();
@@ -70,4 +70,10 @@ export function sendHeartbeat() {
 
 export function updateProfile(payload) {
   return request('/me/profile', { method: 'PATCH', body: payload });
+}
+
+export const exportMyData = () => downloadFile('/me/export', 'commandcentre-my-data.json');
+
+export function deleteMyAccount(currentPassword) {
+  return request('/me', { method: 'DELETE', body: { currentPassword } });
 }
