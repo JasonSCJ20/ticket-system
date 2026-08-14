@@ -4,6 +4,7 @@ import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import * as ticketsApi from '../api/tickets.js';
 import { fetchUsers } from '../api/users.js';
 import { LIFECYCLE_LABELS } from '../api/tickets.js';
+import { analyzeTicket, tendTicket } from '../api/assistant.js';
 import { Card, Chip, FeedbackBanner, Timeline } from '../components/ui.jsx';
 
 function slaLabel(slaDueAt, breachedSla) {
@@ -91,10 +92,40 @@ export default function TicketDetail({ ticket, onClose, onChanged }) {
   const staff = useApi(fetchUsers, []);
   const [newComment, setNewComment] = useState('');
   const [busy, setBusy] = useState(false);
-  const { feedback, notifyError, clear } = useActionFeedback();
+  const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [editingField, setEditingField] = useState(null);
   const [fieldDrafts, setFieldDrafts] = useState({ rootCause: ticket.rootCause, actionsTaken: ticket.actionsTaken, preventiveActions: ticket.preventiveActions });
   const [reassigning, setReassigning] = useState(false);
+  const [aiResult, setAiResult] = useState(null);
+  const [aiBusy, setAiBusy] = useState(false);
+
+  const handleAskAi = async () => {
+    setAiBusy(true);
+    clear();
+    try {
+      const result = await analyzeTicket(ticket.id);
+      setAiResult(result);
+    } catch (err) {
+      notifyError(err, 'The assistant could not analyze this ticket.');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const handleAiRespond = async () => {
+    if (!window.confirm("Let the assistant advance this ticket automatically? This may change its status/stage and add a follow-up action item.")) return;
+    setAiBusy(true);
+    clear();
+    try {
+      const result = await tendTicket(ticket.id);
+      notifySuccess(result.actionSummary || 'The assistant acted on this ticket.');
+      onChanged();
+    } catch (err) {
+      notifyError(err, 'The assistant could not act on this ticket.');
+    } finally {
+      setAiBusy(false);
+    }
+  };
 
   const currentIndex = ticketsApi.LIFECYCLE_STAGES.indexOf(ticket.lifecycleStage || 'identified');
   const nextStage = ticketsApi.LIFECYCLE_STAGES[currentIndex + 1];
@@ -274,6 +305,35 @@ export default function TicketDetail({ ticket, onClose, onChanged }) {
           >
             Move to "{ticketsApi.LIFECYCLE_LABELS[nextStage]}"
           </button>
+        )}
+      </div>
+
+      <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, marginBottom: 16 }}>
+        <p style={{ fontSize: 11, fontWeight: 700, margin: '0 0 8px' }}>Assistant</p>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: aiResult ? 10 : 0 }}>
+          <button
+            disabled={aiBusy}
+            onClick={handleAskAi}
+            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--accent)', background: 'transparent', color: 'var(--accent)', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}
+          >
+            Analyze
+          </button>
+          <button
+            disabled={aiBusy}
+            onClick={handleAiRespond}
+            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid var(--accent)', background: 'var(--accent)', color: 'var(--bg)', fontSize: 11.5, fontWeight: 600, cursor: 'pointer' }}
+          >
+            Auto-advance
+          </button>
+        </div>
+        {aiResult && (
+          <div style={{ fontSize: 12.5 }}>
+            <p style={{ margin: '0 0 6px' }}>{aiResult.summary}</p>
+            <ul style={{ margin: '0 0 8px', paddingLeft: 18, color: 'var(--text-muted)' }}>
+              {aiResult.productivityPlan.map((step, i) => <li key={i} style={{ marginBottom: 2 }}>{step}</li>)}
+            </ul>
+            <p style={{ margin: 0, color: 'var(--text-muted)', fontStyle: 'italic' }}>{aiResult.coaching}</p>
+          </div>
         )}
       </div>
 

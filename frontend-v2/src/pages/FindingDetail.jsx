@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Card, Badge, FeedbackBanner } from '../components/ui.jsx';
 import { fetchFindingBrief, confirmFinding, updateFindingStatus, createTicketFromFinding } from '../api/security.js';
+import { analyzeAlert, tendAlert } from '../api/assistant.js';
 import { useApi } from '../hooks/useApi.js';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 
@@ -24,6 +25,36 @@ export default function FindingDetail({ finding, onClose, onChanged, readOnly = 
   const [busy, setBusy] = useState(false);
   const { feedback, notifySuccess, notifyError, clear } = useActionFeedback();
   const [reason, setReason] = useState('');
+  const [aiResult, setAiResult] = useState(null);
+  const [aiBusy, setAiBusy] = useState(false);
+
+  const handleAskAi = async () => {
+    setAiBusy(true);
+    clear();
+    try {
+      const result = await analyzeAlert(finding.id);
+      setAiResult(result);
+    } catch (err) {
+      notifyError(err, 'The assistant could not analyze this alert.');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  const handleAiRespond = async () => {
+    if (!window.confirm("Let the assistant respond automatically? This may change this alert's status and create or link a ticket.")) return;
+    setAiBusy(true);
+    clear();
+    try {
+      const result = await tendAlert(finding.id);
+      notifySuccess(result.actionSummary || 'The assistant responded to this alert.');
+      onChanged();
+    } catch (err) {
+      notifyError(err, 'The assistant could not respond to this alert.');
+    } finally {
+      setAiBusy(false);
+    }
+  };
 
   const handleConfirm = async () => {
     setBusy(true);
@@ -111,6 +142,28 @@ export default function FindingDetail({ finding, onClose, onChanged, readOnly = 
           )}
         </div>
       )}
+
+      <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, marginBottom: 14 }}>
+        <p style={{ fontSize: 11, fontWeight: 700, margin: '0 0 8px' }}>Assistant</p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: aiResult ? 10 : 0 }}>
+          <button disabled={aiBusy} onClick={handleAskAi} style={btnStyle('var(--accent)', true)}>
+            Analyze
+          </button>
+          {!readOnly && (
+            <button disabled={aiBusy} onClick={handleAiRespond} style={btnStyle('var(--accent)')}>
+              Auto-respond
+            </button>
+          )}
+        </div>
+        {aiResult && (
+          <div style={{ fontSize: 12.5 }}>
+            <p style={{ margin: '0 0 6px' }}>{aiResult.interpretation}</p>
+            <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--text-muted)' }}>
+              {aiResult.recommendedActions.map((a, i) => <li key={i} style={{ marginBottom: 2 }}>{a}</li>)}
+            </ul>
+          </div>
+        )}
+      </div>
 
       {!readOnly && (
         <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>

@@ -1,5 +1,6 @@
 import { useApi } from '../hooks/useApi.js';
 import { fetchFortressPosture, fetchApplications, fetchNetworkDevices, fetchDatabaseAssets, fetchFindings } from '../api/security.js';
+import { fetchCommandCentre } from '../api/assistant.js';
 import { Card, ErrorState, StatCard, StatCardRow, StatusDot } from '../components/ui.jsx';
 
 const CONTROL_LABELS = {
@@ -43,6 +44,10 @@ export default function Dashboard() {
   // tab shows when filtered to the same statuses.
   const priorityFindingsApi = useApi(() => fetchFindings({ status: 'new,investigating', severity: 'high,critical' }), []);
   const resolvedFindingsApi = useApi(() => fetchFindings({ status: 'remediated' }), []);
+  // Deliberately its own useApi call, not folded into anyLoading/anyError
+  // below — this is a secondary, nice-to-have briefing, not core dashboard
+  // data, so a slow or failed assistant call must never blank the page.
+  const briefing = useApi(fetchCommandCentre, []);
 
   const anyError = posture.error || apps.error || devices.error || databases.error || priorityFindingsApi.error || resolvedFindingsApi.error;
   const anyLoading = posture.loading || apps.loading || devices.loading || databases.loading || priorityFindingsApi.loading || resolvedFindingsApi.loading;
@@ -104,6 +109,17 @@ export default function Dashboard() {
           </p>
         </div>
       </div>
+
+      {!briefing.loading && !briefing.error && briefing.data && (
+        <Card title="Assistant briefing" style={{ padding: '1rem 1.25rem' }}>
+          <p style={{ fontSize: 13.5, fontWeight: 500, margin: '0 0 10px' }}>{briefing.data.priorityAction}</p>
+          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: 'var(--text-muted)' }}>
+            {(briefing.data.recommendations || []).map((r, i) => (
+              <li key={i} style={{ marginBottom: i === briefing.data.recommendations.length - 1 ? 0 : 4 }}>{r}</li>
+            ))}
+          </ul>
+        </Card>
+      )}
 
       <StatCardRow>
         <StatCard label="Your assets" value={applications.length} />
