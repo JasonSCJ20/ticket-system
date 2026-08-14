@@ -4,6 +4,7 @@ import { Op } from 'sequelize';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 // The definitive proof for Phase 1 multi-tenancy: two REAL organizations,
 // created the same way any two customers would end up isolated, exercised
@@ -106,9 +107,9 @@ beforeAll(async () => {
   });
 
   const loginA = await request(app).post('/api/token').send({ username: 'org-a-admin', password: 'password123' });
-  orgAToken = loginA.body.access_token;
+  orgAToken = extractAuthCookie(loginA);
   const loginB = await request(app).post('/api/token').send({ username: 'org-b-admin', password: 'password123' });
-  orgBToken = loginB.body.access_token;
+  orgBToken = extractAuthCookie(loginB);
 });
 
 afterAll(async () => {
@@ -117,7 +118,7 @@ afterAll(async () => {
 
 describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs)', () => {
   it('tenant A cannot see tenant B\'s assets in GET /applications', async () => {
-    const res = await request(app).get('/api/security/applications').set('Authorization', `Bearer ${orgAToken}`);
+    const res = await request(app).get('/api/security/applications').set('Cookie', orgAToken);
     expect(res.status).toBe(200);
     const names = res.body.map((a) => a.name);
     expect(names).toContain('tenant-a-secret-asset');
@@ -125,7 +126,7 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
   });
 
   it('tenant B cannot see tenant A\'s assets in GET /applications', async () => {
-    const res = await request(app).get('/api/security/applications').set('Authorization', `Bearer ${orgBToken}`);
+    const res = await request(app).get('/api/security/applications').set('Cookie', orgBToken);
     expect(res.status).toBe(200);
     const names = res.body.map((a) => a.name);
     expect(names).toContain('tenant-b-secret-asset');
@@ -138,12 +139,12 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
     // asset id must not resolve, exactly like it doesn't exist.
     const res = await request(app)
       .get(`/api/security/applications/${orgBAssetId}/enforcement-status`)
-      .set('Authorization', `Bearer ${orgAToken}`);
+      .set('Cookie', orgAToken);
     expect([403, 404]).toContain(res.status);
   });
 
   it('tenant A cannot see tenant B\'s findings in GET /findings', async () => {
-    const res = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${orgAToken}`);
+    const res = await request(app).get('/api/security/findings').set('Cookie', orgAToken);
     expect(res.status).toBe(200);
     const titles = res.body.map((f) => f.title);
     expect(titles).toContain('Tenant A confidential finding');
@@ -151,7 +152,7 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
   });
 
   it('tenant B cannot see tenant A\'s findings in GET /findings', async () => {
-    const res = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${orgBToken}`);
+    const res = await request(app).get('/api/security/findings').set('Cookie', orgBToken);
     expect(res.status).toBe(200);
     const titles = res.body.map((f) => f.title);
     expect(titles).toContain('Tenant B confidential finding');
@@ -159,7 +160,7 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
   });
 
   it('tenant A cannot see tenant B\'s tickets in GET /tickets', async () => {
-    const res = await request(app).get('/api/tickets').set('Authorization', `Bearer ${orgAToken}`);
+    const res = await request(app).get('/api/tickets').set('Cookie', orgAToken);
     expect(res.status).toBe(200);
     const titles = res.body.map((t) => t.title);
     expect(titles).toContain('Tenant A confidential ticket');
@@ -169,7 +170,7 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
   it('each tenant has its own independent Fortress security state (lockdown does not cross tenants)', async () => {
     const lockdownA = await request(app)
       .post('/api/security/fortress/kill-switch/lockdown')
-      .set('Authorization', `Bearer ${orgAToken}`)
+      .set('Cookie', orgAToken)
       .send({ active: true, reason: 'tenant A test lockdown' });
     expect(lockdownA.status).toBe(200);
     expect(lockdownA.body.lockdownActive).toBe(true);
@@ -177,14 +178,14 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
     // Tenant B's own status must be completely unaffected by tenant A's lockdown.
     const statusB = await request(app)
       .get('/api/security/fortress/kill-switch/status')
-      .set('Authorization', `Bearer ${orgBToken}`);
+      .set('Cookie', orgBToken);
     expect(statusB.status).toBe(200);
     expect(statusB.body.lockdownActive).toBe(false);
 
     // Clean up tenant A's lockdown so it doesn't affect any other test file.
     await request(app)
       .post('/api/security/fortress/kill-switch/lockdown')
-      .set('Authorization', `Bearer ${orgAToken}`)
+      .set('Cookie', orgAToken)
       .send({ active: false });
   });
 });

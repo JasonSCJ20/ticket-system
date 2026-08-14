@@ -60,6 +60,7 @@ import { logger, requestLoggingMiddleware } from './logger.js';
 import { createErrorHandler } from './services/errorHandler.js';
 import { createNotificationThrottle } from './services/notificationThrottle.js';
 import { runWithOrganization, runAsPlatformAdmin } from './services/tenantContext.js';
+import { setAuthCookie, clearAuthCookie, getTokenFromRequest } from './services/authCookie.js';
 import { buildAssignment5W1H, buildAssignmentGuidance, buildAssignmentMessage, buildResolutionReport, detectAssignmentDomain } from './services/ticketAssist.js';
 import {
   findingImpactedTeams,
@@ -238,8 +239,7 @@ app.use('/api', (_req, res, next) => {
 // authMiddleware, which rejects it properly with 401.
 app.use('/api', (req, res, next) => {
   let organizationId = null;
-  const authHeader = req.headers.authorization;
-  const token = authHeader ? authHeader.split(' ')[1] : null;
+  const token = getTokenFromRequest(req);
   if (token) {
     try {
       const payload = jwt.verify(token, CONFIG.SECRET_KEY);
@@ -293,32 +293,35 @@ const protectedApiLimiter = rateLimit({
 // Keep stricter limits on authentication surface, while protected APIs support high team concurrency.
 app.use(['/api/token', '/api/auth'], authApiLimiter);
 // Configure CORS for local frontend origins (any localhost/127.0.0.1 dev port).
+//
+// Origin checking used to allow ANY https:// origin whatsoever
+// (`allowCustomHttpsOrigin` below, now removed). That was tolerable while
+// auth was a Bearer header a cross-origin page can't forge, but now that
+// auth is an httpOnly cookie the browser attaches automatically,
+// `credentials: true` + a wildcard-ish origin would let any HTTPS site read
+// authenticated responses using the victim's cookie. The production
+// frontend origins are hardcoded here (not left to CORS_ALLOWED_ORIGINS
+// alone) so this allowlist can't silently regress to permissive just
+// because an env var wasn't set.
+const KNOWN_PRODUCTION_FRONTEND_ORIGINS = [
+  'https://soc.scratchsolidsolutions.org',
+  'https://commandcentre-b6k.pages.dev',
+];
 app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
 
     if (explicitCorsOrigins.includes(origin)) return callback(null, true);
-
-    let parsedOrigin = null;
-    try {
-      parsedOrigin = new URL(origin);
-    } catch {
-      parsedOrigin = null;
-    }
+    if (KNOWN_PRODUCTION_FRONTEND_ORIGINS.includes(origin)) return callback(null, true);
 
     const allowLocalhost = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
     const allowPrivateLan = /^http:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/i.test(origin);
-    const allowCloudflarePages = /^https:\/\/[a-z0-9-]+\.ticket-system-frontend-f77\.pages\.dev$/i.test(origin);
-    const allowAnyPagesDev = /^https:\/\/[a-z0-9-]+\.pages\.dev$/i.test(origin);
-    const allowRenderFrontend = /^https:\/\/[a-z0-9-]+\.onrender\.com$/i.test(origin);
-    const allowVercelFrontend = /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin);
-    const allowNetlifyFrontend = /^https:\/\/[a-z0-9-]+\.netlify\.app$/i.test(origin);
-    const allowCustomHttpsOrigin = parsedOrigin?.protocol === 'https:' && Boolean(parsedOrigin.hostname);
-    if (allowLocalhost || allowPrivateLan || allowCloudflarePages || allowAnyPagesDev || allowRenderFrontend || allowVercelFrontend || allowNetlifyFrontend || allowCustomHttpsOrigin) return callback(null, true);
+    if (allowLocalhost || allowPrivateLan) return callback(null, true);
 
     return callback(new Error(`Not allowed by CORS: ${origin}`));
   },
-  methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 // Parse JSON bodies with size limit
@@ -350,14 +353,11 @@ app.get('/api/healthz/deep', async (_req, res) => {
 
 // Middleware function for JWT authentication
 async function authMiddleware(req, res, next) {
-  // Get authorization header
-  const authHeader = req.headers.authorization;
-  // Check if header exists
-  if (!authHeader) return res.status(401).json({ error: 'No token provided' });
-  // Extract token from "Bearer <token>" format
-  const token = authHeader.split(' ')[1];
-  // Check if token exists
-  if (!token) return res.status(401).json({ error: 'Missing token' });
+  // Prefers an Authorization header (kept for scripted/API use) and falls
+  // back to the httpOnly auth cookie the frontend now relies on — see
+  // services/authCookie.js for why both remain valid.
+  const token = getTokenFromRequest(req);
+  if (!token) return res.status(401).json({ error: 'No token provided' });
 
   try {
     // Verify and decode JWT token
@@ -1932,6 +1932,8 @@ async function setup() {
         CONFIG.SECRET_KEY,
         { expiresIn: CONFIG.ACCESS_TOKEN_TTL || '15m' },
       );
+      const { exp: refreshedExp } = jwt.decode(refreshedToken);
+      setAuthCookie(res, refreshedToken, refreshedExp * 1000 - Date.now());
       return res.json({
         ok: true,
         operationalTeams: profileState.operationalTeams,
@@ -1945,7 +1947,6 @@ async function setup() {
         notifyEmail: Boolean(user.notifyEmail),
         profileCompletionRequired: !profileState.isComplete,
         profileCompletionIssues: profileState.issues,
-        access_token: refreshedToken,
         token_type: 'bearer',
       });
     },

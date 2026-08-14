@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let ownerToken;
 let otherOwnerToken;
@@ -131,11 +132,11 @@ beforeAll(async () => {
   });
 
   const adminLogin = await request(app).post('/api/token').send({ username: 'admin_owner_test', password: 'password123' });
-  adminToken = adminLogin.body.access_token;
+  adminToken = extractAuthCookie(adminLogin);
   const ownerLogin = await request(app).post('/api/token').send({ username: 'owner_test_a', password: 'password123' });
-  ownerToken = ownerLogin.body.access_token;
+  ownerToken = extractAuthCookie(ownerLogin);
   const otherOwnerLogin = await request(app).post('/api/token').send({ username: 'owner_test_b', password: 'password123' });
-  otherOwnerToken = otherOwnerLogin.body.access_token;
+  otherOwnerToken = extractAuthCookie(otherOwnerLogin);
 });
 
 afterAll(async () => {
@@ -144,7 +145,7 @@ afterAll(async () => {
 
 describe('owner-role asset/finding scoping', () => {
   it('an owner sees only their own asset in GET /applications', async () => {
-    const res = await request(app).get('/api/security/applications').set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get('/api/security/applications').set('Cookie', ownerToken);
     expect(res.status).toBe(200);
     const ids = res.body.map((a) => a.id);
     expect(ids).toContain(myAssetId);
@@ -152,7 +153,7 @@ describe('owner-role asset/finding scoping', () => {
   });
 
   it('a different owner sees only their own, different asset', async () => {
-    const res = await request(app).get('/api/security/applications').set('Authorization', `Bearer ${otherOwnerToken}`);
+    const res = await request(app).get('/api/security/applications').set('Cookie', otherOwnerToken);
     expect(res.status).toBe(200);
     const ids = res.body.map((a) => a.id);
     expect(ids).toContain(otherAssetId);
@@ -160,7 +161,7 @@ describe('owner-role asset/finding scoping', () => {
   });
 
   it('an owner sees only findings tied to their own asset in GET /findings', async () => {
-    const res = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get('/api/security/findings').set('Cookie', ownerToken);
     expect(res.status).toBe(200);
     const titles = res.body.map((f) => f.title);
     expect(titles).toContain('Finding on asset A');
@@ -168,33 +169,33 @@ describe('owner-role asset/finding scoping', () => {
   });
 
   it('admin is unaffected and still sees every asset and finding', async () => {
-    const assetsRes = await request(app).get('/api/security/applications').set('Authorization', `Bearer ${adminToken}`);
+    const assetsRes = await request(app).get('/api/security/applications').set('Cookie', adminToken);
     const ids = assetsRes.body.map((a) => a.id);
     expect(ids).toContain(myAssetId);
     expect(ids).toContain(otherAssetId);
 
-    const findingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${adminToken}`);
+    const findingsRes = await request(app).get('/api/security/findings').set('Cookie', adminToken);
     const titles = findingsRes.body.map((f) => f.title);
     expect(titles).toContain('Finding on asset A');
     expect(titles).toContain('Finding on asset B');
   });
 
   it('an owner can fetch the brief for their own finding', async () => {
-    const findingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${ownerToken}`);
+    const findingsRes = await request(app).get('/api/security/findings').set('Cookie', ownerToken);
     const mine = findingsRes.body.find((f) => f.title === 'Finding on asset A');
-    const res = await request(app).get(`/api/security/findings/${mine.id}/brief`).set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get(`/api/security/findings/${mine.id}/brief`).set('Cookie', ownerToken);
     expect(res.status).toBe(200);
   });
 
   it('an owner gets 404, not the data, when guessing another owner\'s finding ID', async () => {
-    const adminFindingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${adminToken}`);
+    const adminFindingsRes = await request(app).get('/api/security/findings').set('Cookie', adminToken);
     const notMine = adminFindingsRes.body.find((f) => f.title === 'Finding on asset B');
-    const res = await request(app).get(`/api/security/findings/${notMine.id}/brief`).set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get(`/api/security/findings/${notMine.id}/brief`).set('Cookie', ownerToken);
     expect(res.status).toBe(404);
   });
 
   it('an owner sees only network devices that belong to their own application, never orphans or other owners\' devices', async () => {
-    const res = await request(app).get('/api/security/network/devices').set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get('/api/security/network/devices').set('Cookie', ownerToken);
     expect(res.status).toBe(200);
     const ids = res.body.map((d) => d.id);
     expect(ids).toContain(myDeviceId);
@@ -203,7 +204,7 @@ describe('owner-role asset/finding scoping', () => {
   });
 
   it('admin still sees every network device including orphans', async () => {
-    const res = await request(app).get('/api/security/network/devices').set('Authorization', `Bearer ${adminToken}`);
+    const res = await request(app).get('/api/security/network/devices').set('Cookie', adminToken);
     const ids = res.body.map((d) => d.id);
     expect(ids).toContain(myDeviceId);
     expect(ids).toContain(otherDeviceId);
@@ -213,42 +214,42 @@ describe('owner-role asset/finding scoping', () => {
 
 describe('owner role is blocked from internal-only routes', () => {
   it('cannot list tickets', async () => {
-    const res = await request(app).get('/api/tickets').set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get('/api/tickets').set('Cookie', ownerToken);
     expect(res.status).toBe(403);
   });
 
   it('cannot list the team roster', async () => {
-    const res = await request(app).get('/api/users').set('Authorization', `Bearer ${ownerToken}`);
+    const res = await request(app).get('/api/users').set('Cookie', ownerToken);
     expect(res.status).toBe(403);
   });
 
   it('cannot fetch monthly or technical reports', async () => {
-    const monthly = await request(app).get('/api/reports/monthly').set('Authorization', `Bearer ${ownerToken}`);
+    const monthly = await request(app).get('/api/reports/monthly').set('Cookie', ownerToken);
     expect(monthly.status).toBe(403);
-    const technical = await request(app).get('/api/reports/technical').set('Authorization', `Bearer ${ownerToken}`);
+    const technical = await request(app).get('/api/reports/technical').set('Cookie', ownerToken);
     expect(technical.status).toBe(403);
   });
 
   it('cannot read SOC operational telemetry', async () => {
-    const feed = await request(app).get('/api/security/soc/live-feed').set('Authorization', `Bearer ${ownerToken}`);
+    const feed = await request(app).get('/api/security/soc/live-feed').set('Cookie', ownerToken);
     expect(feed.status).toBe(403);
-    const origins = await request(app).get('/api/security/soc/threat-origins').set('Authorization', `Bearer ${ownerToken}`);
+    const origins = await request(app).get('/api/security/soc/threat-origins').set('Cookie', ownerToken);
     expect(origins.status).toBe(403);
   });
 
   it('cannot list patch tasks or scan run history', async () => {
-    const patches = await request(app).get('/api/security/patches').set('Authorization', `Bearer ${ownerToken}`);
+    const patches = await request(app).get('/api/security/patches').set('Cookie', ownerToken);
     expect(patches.status).toBe(403);
-    const scans = await request(app).get('/api/security/scan/runs').set('Authorization', `Bearer ${ownerToken}`);
+    const scans = await request(app).get('/api/security/scan/runs').set('Cookie', ownerToken);
     expect(scans.status).toBe(403);
   });
 
   it('cannot confirm a finding or create a ticket from one', async () => {
-    const findingsRes = await request(app).get('/api/security/findings').set('Authorization', `Bearer ${ownerToken}`);
+    const findingsRes = await request(app).get('/api/security/findings').set('Cookie', ownerToken);
     const mine = findingsRes.body.find((f) => f.title === 'Finding on asset A');
-    const confirm = await request(app).post(`/api/security/findings/${mine.id}/confirm`).set('Authorization', `Bearer ${ownerToken}`);
+    const confirm = await request(app).post(`/api/security/findings/${mine.id}/confirm`).set('Cookie', ownerToken);
     expect(confirm.status).toBe(403);
-    const createTicket = await request(app).post(`/api/security/findings/${mine.id}/create-ticket`).set('Authorization', `Bearer ${ownerToken}`);
+    const createTicket = await request(app).post(`/api/security/findings/${mine.id}/create-ticket`).set('Cookie', ownerToken);
     expect(createTicket.status).toBe(403);
   });
 
@@ -267,15 +268,15 @@ describe('owner role is blocked from internal-only routes', () => {
       '/api/security/fortress/posture',
     ];
     for (const path of paths) {
-      const res = await request(app).get(path).set('Authorization', `Bearer ${ownerToken}`);
+      const res = await request(app).get(path).set('Cookie', ownerToken);
       expect(res.status).toBe(403);
     }
   });
 
   it('admin and analyst are unaffected by the new gates', async () => {
-    const ticketsAdmin = await request(app).get('/api/tickets').set('Authorization', `Bearer ${adminToken}`);
+    const ticketsAdmin = await request(app).get('/api/tickets').set('Cookie', adminToken);
     expect(ticketsAdmin.status).toBe(200);
-    const usersAdmin = await request(app).get('/api/users').set('Authorization', `Bearer ${adminToken}`);
+    const usersAdmin = await request(app).get('/api/users').set('Cookie', adminToken);
     expect(usersAdmin.status).toBe(200);
   });
 });

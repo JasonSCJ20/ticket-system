@@ -4,6 +4,7 @@ import http from 'http';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let token;
 let defaultOrgId;
@@ -49,7 +50,7 @@ beforeAll(async () => {
     .post('/api/token')
     .send({ username: 'admin_test', password: 'password123' });
   expect(res.status).toBe(200);
-  token = res.body.access_token;
+  token = extractAuthCookie(res);
 });
 
 afterAll(async () => {
@@ -65,7 +66,7 @@ describe('Auth', () => {
   it('accepts heartbeat for authenticated users', async () => {
     const res = await request(app)
       .post('/api/heartbeat')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({});
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('ok', true);
@@ -107,14 +108,14 @@ describe('Registration Policy', () => {
       .send({ username: 'Jane Doe', password: 'StrongPassword1!' });
 
     expect(loginRes.status).toBe(200);
-    expect(loginRes.body).toHaveProperty('access_token');
+    expect(() => extractAuthCookie(loginRes)).not.toThrow();
 
     const normalizedLoginRes = await request(app)
       .post('/api/token')
       .send({ username: '  jane doe  ', password: 'StrongPassword1!' });
 
     expect(normalizedLoginRes.status).toBe(200);
-    expect(normalizedLoginRes.body).toHaveProperty('access_token');
+    expect(() => extractAuthCookie(normalizedLoginRes)).not.toThrow();
   });
 
   it('rejects account creation for non-scratchsolidsolutions.org email domains', async () => {
@@ -160,7 +161,7 @@ describe('Users', () => {
   it('creates a user as admin', async () => {
     const res = await request(app)
       .post('/api/users')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         name: 'testuser_jest',
         surname: 'qa',
@@ -186,7 +187,7 @@ describe('Users', () => {
   it('lists users as admin', async () => {
     const res = await request(app)
       .get('/api/users')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
   });
@@ -196,7 +197,7 @@ describe('Tickets', () => {
   it('creates a ticket', async () => {
     const res = await request(app)
       .post('/api/tickets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'Test Ticket',
         description: 'This is a test ticket body',
@@ -212,7 +213,7 @@ describe('Tickets', () => {
   it('rejects a ticket with no asset link', async () => {
     const res = await request(app)
       .post('/api/tickets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'No Asset Ticket',
         description: 'This ticket omits assetLinks entirely',
@@ -224,7 +225,7 @@ describe('Tickets', () => {
   it('rejects a ticket that links a nonexistent asset', async () => {
     const res = await request(app)
       .post('/api/tickets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'Fake Asset Ticket',
         description: 'This ticket links an asset id that does not exist',
@@ -237,7 +238,7 @@ describe('Tickets', () => {
   it('persists root cause, actions taken, and preventive actions on update', async () => {
     const created = await request(app)
       .post('/api/tickets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'WHY HOW Ticket',
         description: 'Ticket for verifying WHY/HOW fields persist',
@@ -248,7 +249,7 @@ describe('Tickets', () => {
 
     const patched = await request(app)
       .patch(`/api/tickets/${created.body.id}`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         rootCause: 'An outdated dependency introduced the vulnerability.',
         actionsTaken: 'Applied the vendor patch and redeployed.',
@@ -263,7 +264,7 @@ describe('Tickets', () => {
   it('lists tickets', async () => {
     const res = await request(app)
       .get('/api/tickets')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
   });
@@ -271,7 +272,7 @@ describe('Tickets', () => {
   it('transitions lifecycle stage and stores collaboration artifacts', async () => {
     const created = await request(app)
       .post('/api/tickets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'Lifecycle Ticket',
         description: 'Incident lifecycle transition validation ticket',
@@ -285,33 +286,33 @@ describe('Tickets', () => {
 
     const moved = await request(app)
       .post(`/api/tickets/${ticketId}/transition`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ stage: 'triaged', note: 'Triaged during test' });
     expect(moved.status).toBe(200);
     expect(moved.body.lifecycleStage).toBe('triaged');
 
     const comment = await request(app)
       .post(`/api/tickets/${ticketId}/comments`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ message: 'Initial triage note', visibility: 'internal' });
     expect(comment.status).toBe(201);
 
     const actionItem = await request(app)
       .post(`/api/tickets/${ticketId}/action-items`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ title: 'Collect endpoint forensic image', ownerScjId: '00361031-09999' });
     expect(actionItem.status).toBe(201);
 
     const comments = await request(app)
       .get(`/api/tickets/${ticketId}/comments`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(comments.status).toBe(200);
     expect(Array.isArray(comments.body)).toBe(true);
     expect(comments.body.length).toBeGreaterThan(0);
 
     const items = await request(app)
       .get(`/api/tickets/${ticketId}/action-items`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(items.status).toBe(200);
     expect(Array.isArray(items.body)).toBe(true);
     expect(items.body.length).toBeGreaterThan(0);
@@ -322,25 +323,25 @@ describe('Reports, Governance, and Assistant', () => {
   it('returns executive metrics and reports', async () => {
     const metrics = await request(app)
       .get('/api/tickets/metrics/executive')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(metrics.status).toBe(200);
     expect(metrics.body).toHaveProperty('activeTickets');
 
     const impact = await request(app)
       .get('/api/security/executive-impact')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(impact.status).toBe(200);
     expect(impact.body).toHaveProperty('riskIndex');
 
     const executive = await request(app)
       .get('/api/reports/executive')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(executive.status).toBe(200);
     expect(executive.body).toHaveProperty('audience', 'executive');
 
     const technical = await request(app)
       .get('/api/reports/technical')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(technical.status).toBe(200);
     expect(technical.body).toHaveProperty('audience', 'technical');
   });
@@ -348,7 +349,7 @@ describe('Reports, Governance, and Assistant', () => {
   it('returns command centre fortress posture telemetry', async () => {
     const res = await request(app)
       .get('/api/security/fortress/posture')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('fortressScore');
@@ -376,7 +377,7 @@ describe('Reports, Governance, and Assistant', () => {
   it('accepts fortress tooling heartbeat events and reflects them in posture', async () => {
     const heartbeat = await request(app)
       .post('/api/security/fortress/tooling/heartbeat')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         id: 'runtime-guardian',
         engine: 'Cilium Tetragon',
@@ -394,7 +395,7 @@ describe('Reports, Governance, and Assistant', () => {
 
     const posture = await request(app)
       .get('/api/security/fortress/posture')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(posture.status).toBe(200);
     const runtimeGuardian = posture.body.securityTooling.find((item) => item.id === 'runtime-guardian');
@@ -412,7 +413,7 @@ describe('Reports, Governance, and Assistant', () => {
   it('runs a fortress recovery drill and returns remediation guidance', async () => {
     const res = await request(app)
       .post('/api/security/fortress/recovery-drill')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('exerciseStatus');
@@ -423,7 +424,7 @@ describe('Reports, Governance, and Assistant', () => {
   it('generates assistant triage and audit logs', async () => {
     const triage = await request(app)
       .post('/api/assistant/triage')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'Potential phishing event',
         description: 'User received suspicious credential harvesting email and clicked link.',
@@ -436,7 +437,7 @@ describe('Reports, Governance, and Assistant', () => {
 
     const governance = await request(app)
       .get('/api/governance/audit-logs')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(governance.status).toBe(200);
     expect(Array.isArray(governance.body)).toBe(true);
   });
@@ -444,7 +445,7 @@ describe('Reports, Governance, and Assistant', () => {
   it('returns workforce telemetry and notification ledger for governance users', async () => {
     const workforce = await request(app)
       .get('/api/governance/workforce-telemetry')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(workforce.status).toBe(200);
     expect(workforce.body).toHaveProperty('summary');
     expect(workforce.body).toHaveProperty('users');
@@ -452,7 +453,7 @@ describe('Reports, Governance, and Assistant', () => {
 
     const ledger = await request(app)
       .get('/api/governance/notification-ledger')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(ledger.status).toBe(200);
     expect(Array.isArray(ledger.body)).toBe(true);
   });
@@ -461,7 +462,7 @@ describe('Reports, Governance, and Assistant', () => {
     const previousToken = token;
     const updated = await request(app)
       .patch('/api/me/profile')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         audienceCode: 'TJN',
         telegramNumber: null,
@@ -471,18 +472,18 @@ describe('Reports, Governance, and Assistant', () => {
 
     expect(updated.status).toBe(200);
     expect(updated.body).toHaveProperty('ok', true);
-    expect(updated.body).toHaveProperty('access_token');
     expect(updated.body).toHaveProperty('token_type', 'bearer');
-    token = updated.body.access_token;
+    expect(() => extractAuthCookie(updated)).not.toThrow();
+    token = extractAuthCookie(updated);
 
     const oldTokenRequest = await request(app)
       .get('/api/assistant/command-centre')
-      .set('Authorization', `Bearer ${previousToken}`);
+      .set('Cookie', previousToken);
     expect(oldTokenRequest.status).toBe(401);
 
     const newTokenRequest = await request(app)
       .get('/api/assistant/command-centre')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(newTokenRequest.status).toBe(200);
   });
 
@@ -510,14 +511,14 @@ describe('Reports, Governance, and Assistant', () => {
 
     const denied = await request(app)
       .get('/api/governance/workforce-telemetry')
-      .set('Authorization', `Bearer ${login.body.access_token}`);
+      .set('Cookie', extractAuthCookie(login));
     expect(denied.status).toBe(403);
   });
 
   it('returns enriched assistant command-centre context', async () => {
     const res = await request(app)
       .get('/api/assistant/command-centre')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('summary');
@@ -531,7 +532,7 @@ describe('Reports, Governance, and Assistant', () => {
   it('auto-tends a ticket and applies lifecycle progression', async () => {
     const created = await request(app)
       .post('/api/tickets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         title: 'Assistant Tend Ticket',
         description: 'Validate one-click ticket tending workflow',
@@ -543,7 +544,7 @@ describe('Reports, Governance, and Assistant', () => {
 
     const tended = await request(app)
       .post('/api/assistant/tend-ticket')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         ticketId: created.body.id,
         notes: 'Auto-tend during API test',
@@ -571,7 +572,7 @@ describe('Reports, Governance, and Assistant', () => {
 
     const tended = await request(app)
       .post('/api/assistant/tend-alert')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         findingId: finding.id,
         assigneeId: '00361031-09999',
@@ -627,7 +628,7 @@ describe('Password Recovery Hardening', () => {
 
     const governance = await request(app)
       .get('/api/governance/audit-logs')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(governance.status).toBe(200);
 
     const actions = governance.body.map((entry) => entry.action);
@@ -640,7 +641,7 @@ describe('Patch Management', () => {
   it('creates, lists, and transitions patch tasks by asset class', async () => {
     const appAsset = await request(app)
       .post('/api/security/applications')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         name: `Patch App ${Date.now()}`,
         baseUrl: 'http://localhost:3001/health',
@@ -650,7 +651,7 @@ describe('Patch Management', () => {
 
     const networkAsset = await request(app)
       .post('/api/security/network/devices')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         name: `Patch Router ${Date.now()}`,
         deviceType: 'router',
@@ -660,7 +661,7 @@ describe('Patch Management', () => {
 
     const dbAsset = await request(app)
       .post('/api/security/database/assets')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         name: `Patch DB ${Date.now()}`,
         engine: 'postgresql',
@@ -671,7 +672,7 @@ describe('Patch Management', () => {
 
     const patch1 = await request(app)
       .post('/api/security/patches')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         assetType: 'application',
         assetId: appAsset.body.id,
@@ -682,7 +683,7 @@ describe('Patch Management', () => {
 
     const patch2 = await request(app)
       .post('/api/security/patches')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         assetType: 'network_device',
         assetId: networkAsset.body.id,
@@ -693,7 +694,7 @@ describe('Patch Management', () => {
 
     const patch3 = await request(app)
       .post('/api/security/patches')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         assetType: 'database_asset',
         assetId: dbAsset.body.id,
@@ -704,7 +705,7 @@ describe('Patch Management', () => {
 
     const board = await request(app)
       .get('/api/security/patches')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(board.status).toBe(200);
     expect(board.body.summary.total).toBeGreaterThanOrEqual(3);
     expect(board.body.grouped.application.todo.length).toBeGreaterThan(0);
@@ -713,14 +714,14 @@ describe('Patch Management', () => {
 
     const moved = await request(app)
       .patch(`/api/security/patches/${patch2.body.id}/status`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ status: 'in_progress' });
     expect(moved.status).toBe(200);
     expect(moved.body.status).toBe('in_progress');
 
     const completed = await request(app)
       .patch(`/api/security/patches/${patch3.body.id}/status`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ status: 'completed' });
     expect(completed.status).toBe(200);
     expect(completed.body.status).toBe('completed');
@@ -732,7 +733,7 @@ describe('Route Module Coverage', () => {
   it('returns automation status for admin users', async () => {
     const res = await request(app)
       .get('/api/automation/status')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('networkEnabled');
@@ -757,7 +758,7 @@ describe('Scan Queue Throughput', () => {
   it('accepts passive scan requests as queued jobs', async () => {
     const res = await request(app)
       .post('/api/security/scan/passive')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(res.status).toBe(202);
     expect(res.body).toHaveProperty('accepted', true);
@@ -767,7 +768,7 @@ describe('Scan Queue Throughput', () => {
 
     const job = await request(app)
       .get(`/api/security/scan/jobs/${res.body.jobId}`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(job.status).toBe(200);
     expect(job.body).toHaveProperty('id', res.body.jobId);
@@ -780,7 +781,7 @@ describe('Asset Types (non-application assets)', () => {
   it('registers a router by IP address alone, with no base URL', async () => {
     const res = await request(app)
       .post('/api/security/applications')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({
         name: `office-router-${Date.now()}`,
         assetType: 'router',
@@ -796,7 +797,7 @@ describe('Asset Types (non-application assets)', () => {
   it('rejects an asset with neither a base URL nor an IP address', async () => {
     const res = await request(app)
       .post('/api/security/applications')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ name: `unreachable-asset-${Date.now()}`, environment: 'production' });
     expect(res.status).toBe(422);
   });
@@ -804,7 +805,7 @@ describe('Asset Types (non-application assets)', () => {
   it('never exposes raw key hashes or the edge credential ciphertext in the asset list', async () => {
     const res = await request(app)
       .get('/api/security/applications')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(res.status).toBe(200);
     for (const asset of res.body) {
       expect(asset).not.toHaveProperty('agentKeyHash');
@@ -846,7 +847,7 @@ describe('Asset Enforcement Onboarding', () => {
   it('issues an agent key and requires it for heartbeats', async () => {
     const issued = await request(app)
       .post(`/api/security/applications/${assetId}/agent-key`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(issued.status).toBe(201);
     expect(issued.body).toHaveProperty('agentKey');
     expect(issued.body.agentKey).toMatch(/^cca_/);
@@ -873,13 +874,13 @@ describe('Asset Enforcement Onboarding', () => {
   it('blocks promotion to active mode until verification succeeds, then allows it', async () => {
     const blocked = await request(app)
       .patch(`/api/security/applications/${assetId}/mode`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ mode: 'active' });
     expect(blocked.status).toBe(409);
 
     const verify = await request(app)
       .post(`/api/security/applications/${assetId}/verify`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(verify.status).toBe(202);
     expect(verify.body).toHaveProperty('verificationId');
     const nonce = verify.body.verificationId;
@@ -891,7 +892,7 @@ describe('Asset Enforcement Onboarding', () => {
     // verifies the agent-report auth path.
     const reissued = await request(app)
       .post(`/api/security/applications/${assetId}/agent-key`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     const report = await request(app)
       .post(`/api/security/applications/${assetId}/agent-report`)
@@ -905,13 +906,13 @@ describe('Asset Enforcement Onboarding', () => {
 
     const status = await request(app)
       .get(`/api/security/applications/${assetId}/verify/${nonce}`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(status.status).toBe(200);
     expect(status.body.status).toBe('verified');
 
     const promoted = await request(app)
       .patch(`/api/security/applications/${assetId}/mode`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ mode: 'active' });
     expect(promoted.status).toBe(200);
     expect(promoted.body).toHaveProperty('mode', 'active');
@@ -977,13 +978,13 @@ describe('Edge Enforcement (Cloudflare)', () => {
   it('rejects verification for a token/zone the provider does not recognize', async () => {
     const set = await request(app)
       .post(`/api/security/applications/${assetId}/edge-credential`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ token: 'cf-token-placeholder', meta: { zoneId: 'zone-bad' } });
     expect(set.status).toBe(201);
 
     const verify = await request(app)
       .post(`/api/security/applications/${assetId}/verify`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(verify.status).toBe(200);
     expect(verify.body.status).toBe('failed');
 
@@ -994,30 +995,30 @@ describe('Edge Enforcement (Cloudflare)', () => {
   it('verifies a real zone, promotes to active, then blocks and unblocks an IP against the real provider API', async () => {
     await request(app)
       .post(`/api/security/applications/${assetId}/edge-credential`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ token: 'cf-token-placeholder', meta: { zoneId: 'zone-good' } });
 
     const verify = await request(app)
       .post(`/api/security/applications/${assetId}/verify`)
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
     expect(verify.status).toBe(200);
     expect(verify.body.status).toBe('verified');
 
     const promoted = await request(app)
       .patch(`/api/security/applications/${assetId}/mode`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ mode: 'active' });
     expect(promoted.status).toBe(200);
 
     const rejectedSession = await request(app)
       .post(`/api/security/applications/${assetId}/commands`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ action: 'block_session', target: 'sess-123' });
     expect(rejectedSession.status).toBe(400);
 
     const blocked = await request(app)
       .post(`/api/security/applications/${assetId}/commands`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ action: 'block_ip', target: '203.0.113.9', reason: 'automated test block' });
     expect(blocked.status).toBe(201);
     expect(blocked.body.status).toBe('acknowledged');
@@ -1026,7 +1027,7 @@ describe('Edge Enforcement (Cloudflare)', () => {
 
     const unblocked = await request(app)
       .post(`/api/security/applications/${assetId}/commands`)
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ action: 'unblock_ip', target: '203.0.113.9' });
     expect(unblocked.status).toBe(201);
     expect(unblocked.body.status).toBe('acknowledged');
@@ -1040,45 +1041,45 @@ describe('Fortress Kill Switch', () => {
     // test's activation can't leak into the next.
     await request(app)
       .post('/api/security/fortress/kill-switch/unblock-ip')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ ip: '::ffff:127.0.0.1' });
     await request(app)
       .post('/api/security/fortress/kill-switch/lockdown')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ active: false });
   });
 
   it('blocks the requesting IP and the kill-switch path stays reachable to undo it', async () => {
     const blocked = await request(app)
       .post('/api/security/fortress/kill-switch/block-ip')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ ip: '::ffff:127.0.0.1', reason: 'test' });
     expect(blocked.status).toBe(200);
 
-    const rejected = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    const rejected = await request(app).get('/api/tickets').set('Cookie', token);
     expect(rejected.status).toBe(403);
 
     // The management path itself must stay reachable even while our own IP
     // is blocked — otherwise a self-block has no recovery path.
     const unblocked = await request(app)
       .post('/api/security/fortress/kill-switch/unblock-ip')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ ip: '::ffff:127.0.0.1' });
     expect(unblocked.status).toBe(200);
 
-    const restored = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    const restored = await request(app).get('/api/tickets').set('Cookie', token);
     expect(restored.status).toBe(200);
   });
 
   it('full lockdown blocks ordinary routes but exempts login and the kill-switch path', async () => {
     const activated = await request(app)
       .post('/api/security/fortress/kill-switch/lockdown')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ active: true, reason: 'test lockdown' });
     expect(activated.status).toBe(200);
     expect(activated.body).toHaveProperty('lockdownActive', true);
 
-    const duringLockdown = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    const duringLockdown = await request(app).get('/api/tickets').set('Cookie', token);
     expect(duringLockdown.status).toBe(503);
 
     const loginStillWorks = await request(app)
@@ -1088,12 +1089,12 @@ describe('Fortress Kill Switch', () => {
 
     const deactivated = await request(app)
       .post('/api/security/fortress/kill-switch/lockdown')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Cookie', token)
       .send({ active: false });
     expect(deactivated.status).toBe(200);
     expect(deactivated.body).toHaveProperty('lockdownActive', false);
 
-    const afterLockdown = await request(app).get('/api/tickets').set('Authorization', `Bearer ${token}`);
+    const afterLockdown = await request(app).get('/api/tickets').set('Cookie', token);
     expect(afterLockdown.status).toBe(200);
   });
 
@@ -1101,16 +1102,16 @@ describe('Fortress Kill Switch', () => {
     const login = await request(app)
       .post('/api/token')
       .send({ username: 'admin_test', password: 'password123' });
-    const freshToken = login.body.access_token;
+    const freshToken = extractAuthCookie(login);
 
     const revoked = await request(app)
       .post('/api/security/fortress/kill-switch/revoke-sessions')
-      .set('Authorization', `Bearer ${freshToken}`)
+      .set('Cookie', freshToken)
       .send({ reason: 'test revoke' });
     expect(revoked.status).toBe(200);
     expect(revoked.body).toHaveProperty('revoked', true);
 
-    const rejectedOldToken = await request(app).get('/api/tickets').set('Authorization', `Bearer ${freshToken}`);
+    const rejectedOldToken = await request(app).get('/api/tickets').set('Cookie', freshToken);
     expect(rejectedOldToken.status).toBe(401);
 
     // JWT `iat` is second-precision, and the revoke check treats a token
@@ -1125,11 +1126,11 @@ describe('Fortress Kill Switch', () => {
     expect(reLogin.status).toBe(200);
     const worksAfterReLogin = await request(app)
       .get('/api/tickets')
-      .set('Authorization', `Bearer ${reLogin.body.access_token}`);
+      .set('Cookie', extractAuthCookie(reLogin));
     expect(worksAfterReLogin.status).toBe(200);
 
     // Restore the shared `token` used by every other describe block in this
     // file — it was minted before the revoke instant too.
-    token = reLogin.body.access_token;
+    token = extractAuthCookie(reLogin);
   });
 });

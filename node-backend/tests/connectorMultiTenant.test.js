@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 // Real end-to-end test for per-tenant connector secrets: issues a real
 // secret for a second organization via the platform-admin endpoint, then
@@ -43,18 +44,18 @@ beforeAll(async () => {
   });
 
   const login = await request(app).post('/api/token').send({ username: 'platform_admin_connector_test', password: 'password123' });
-  platformAdminToken = login.body.access_token;
+  platformAdminToken = extractAuthCookie(login);
 
   const createOrg = await request(app)
     .post('/api/platform/organizations')
-    .set('Authorization', `Bearer ${platformAdminToken}`)
+    .set('Cookie', platformAdminToken)
     .send({ name: 'Connector Tenant Inc', slug: `connector-tenant-${Date.now()}` });
   secondOrgId = createOrg.body.id;
   secondOrgSlug = createOrg.body.slug;
 
   const issued = await request(app)
     .post(`/api/platform/organizations/${secondOrgId}/connector-secret`)
-    .set('Authorization', `Bearer ${platformAdminToken}`);
+    .set('Cookie', platformAdminToken);
   connectorSecret = issued.body.connectorSecret;
 });
 

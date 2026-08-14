@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 // Real end-to-end check that logging in doesn't crash or misbehave now that
 // every successful login runs the unfamiliar-location check (flagUnfamiliarLogin
@@ -46,7 +47,7 @@ describe('POST /token — unfamiliar-location check does not disrupt normal logi
   it('logs in successfully from a loopback request (resolves to Local / Private, never flagged)', async () => {
     const res = await request(app).post('/api/token').send({ username: 'unfamiliar_login_test', password: 'password123' });
     expect(res.status).toBe(200);
-    expect(res.body.access_token).toBeTruthy();
+    expect(() => extractAuthCookie(res)).not.toThrow();
   });
 
   it('does not create an unfamiliar-login audit entry for a loopback/local login', async () => {

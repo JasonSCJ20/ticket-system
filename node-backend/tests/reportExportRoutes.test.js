@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let adminToken;
 let defaultOrgId;
@@ -27,7 +28,7 @@ beforeAll(async () => {
     });
   });
   const res = await request(app).post('/api/token').send({ username: 'export_admin_test', password: 'password123' });
-  adminToken = res.body.access_token;
+  adminToken = extractAuthCookie(res);
 });
 
 afterAll(async () => {
@@ -38,7 +39,7 @@ describe('GET /api/reports/executive/export.pdf', () => {
   it('returns a real PDF file as an attachment', async () => {
     const res = await request(app)
       .get('/api/reports/executive/export.pdf')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toBe('application/pdf');
@@ -61,7 +62,7 @@ describe('GET /api/reports/executive/export.pdf', () => {
     const login = await request(app).post('/api/token').send({ username: 'export_analyst_test', password: 'password123' });
     const res = await request(app)
       .get('/api/reports/executive/export.pdf')
-      .set('Authorization', `Bearer ${login.body.access_token}`);
+      .set('Cookie', extractAuthCookie(login));
     expect(res.status).toBe(403);
   });
 });
@@ -70,7 +71,7 @@ describe('GET /api/reports/technical/export.csv', () => {
   it('returns real CSV content as an attachment', async () => {
     const res = await request(app)
       .get('/api/reports/technical/export.csv')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
@@ -97,7 +98,7 @@ describe('GET /api/reports/trends', () => {
 
     const res = await request(app)
       .get('/api/reports/trends?type=executive')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);

@@ -4,6 +4,7 @@ import { Op } from 'sequelize';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let orgId;
 let analystToken;
@@ -35,7 +36,7 @@ beforeAll(async () => {
 
   const login = await request(app).post('/api/token').send({ username: 'gdpr_analyst_test', password: 'password123' });
   expect(login.status).toBe(200);
-  analystToken = login.body.access_token;
+  analystToken = extractAuthCookie(login);
 
   // A dedicated single-admin org proves the "can't delete the last admin"
   // guard without touching the shared default org's real admin fixtures.
@@ -55,7 +56,7 @@ beforeAll(async () => {
   });
   const soleAdminLogin = await request(app).post('/api/token').send({ username: 'gdpr_admin_a_test', password: 'password123' });
   expect(soleAdminLogin.status).toBe(200);
-  soleAdminToken = soleAdminLogin.body.access_token;
+  soleAdminToken = extractAuthCookie(soleAdminLogin);
 });
 
 afterAll(async () => {
@@ -106,7 +107,7 @@ describe('GET /api/me/export', () => {
 
     const res = await request(app)
       .get('/api/me/export')
-      .set('Authorization', `Bearer ${analystToken}`);
+      .set('Cookie', analystToken);
 
     expect(res.status).toBe(200);
     expect(res.body.profile.name).toBe('gdpr_analyst_test');
@@ -130,7 +131,7 @@ describe('DELETE /api/me', () => {
   it('rejects an incorrect current password', async () => {
     const res = await request(app)
       .delete('/api/me')
-      .set('Authorization', `Bearer ${analystToken}`)
+      .set('Cookie', analystToken)
       .send({ currentPassword: 'definitely-wrong' });
     expect(res.status).toBe(401);
   });
@@ -138,7 +139,7 @@ describe('DELETE /api/me', () => {
   it('blocks the sole admin of an organization from deleting their own account', async () => {
     const res = await request(app)
       .delete('/api/me')
-      .set('Authorization', `Bearer ${soleAdminToken}`)
+      .set('Cookie', soleAdminToken)
       .send({ currentPassword: 'password123' });
     expect(res.status).toBe(409);
   });
@@ -146,7 +147,7 @@ describe('DELETE /api/me', () => {
   it('anonymizes the account, logs the deletion, and revokes the current session', async () => {
     const res = await request(app)
       .delete('/api/me')
-      .set('Authorization', `Bearer ${analystToken}`)
+      .set('Cookie', analystToken)
       .send({ currentPassword: 'password123' });
     expect(res.status).toBe(200);
 
@@ -164,7 +165,7 @@ describe('DELETE /api/me', () => {
     // Same token that just deleted the account must no longer work.
     const revoked = await request(app)
       .get('/api/me/export')
-      .set('Authorization', `Bearer ${analystToken}`);
+      .set('Cookie', analystToken);
     expect(revoked.status).toBe(401);
   });
 });

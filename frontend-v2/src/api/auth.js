@@ -1,4 +1,4 @@
-import { request, setToken, clearToken, downloadFile } from './client.js';
+import { request, downloadFile } from './client.js';
 
 export async function login(username, password, mfaCode = '') {
   const normalizedUsername = String(username || '').trim();
@@ -16,16 +16,13 @@ export async function login(username, password, mfaCode = '') {
   });
 
   if (data.mfaRequired) return { mfaRequired: true };
-  if (data.access_token) setToken(data.access_token);
+  // The backend sets the auth cookie itself via Set-Cookie — nothing for
+  // this code to store.
   return data;
 }
 
 export async function logout() {
-  try {
-    await request('/auth/logout', { method: 'POST' });
-  } finally {
-    clearToken();
-  }
+  await request('/auth/logout', { method: 'POST' });
 }
 
 export function fetchMfaSetup() {

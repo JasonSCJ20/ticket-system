@@ -8,6 +8,7 @@ import {
   isOperationalStaffAudience,
   normalizeOperationalTeams,
 } from '../services/userProfile.js';
+import { setAuthCookie, clearAuthCookie } from '../services/authCookie.js';
 
 const ALLOWED_REGISTRATION_EMAIL_DOMAIN = '@scratchsolidsolutions.org';
 const SCJ_ID_EXAMPLE = '00000000-00000';
@@ -528,9 +529,13 @@ export default function authRouteFactory({
         config.SECRET_KEY,
         { expiresIn: config.ACCESS_TOKEN_TTL || '15m' },
       );
+      // Read the expiry back off the token itself (rather than re-parsing
+      // ACCESS_TOKEN_TTL's string format) so the cookie's lifetime can never
+      // drift out of sync with the JWT's own expiry.
+      const { exp } = jwt.decode(token);
+      setAuthCookie(res, token, exp * 1000 - Date.now());
       const profileState = getProfileCompletionState(user);
       return res.json({
-        access_token: token,
         token_type: 'bearer',
         mfaEnabled: Boolean(user.mfaEnabled),
         mustChangePassword: Boolean(user.mustChangePassword),
@@ -586,6 +591,7 @@ export default function authRouteFactory({
   router.post('/auth/logout', authMiddleware, async (req, res) => {
     const exp = req.user?.exp ? new Date(req.user.exp * 1000) : null;
     await revokeTokenJti(req.user?.jti, exp);
+    clearAuthCookie(res);
     const user = await userModel.findByPk(req.user.sub);
     if (user) {
       await user.update({

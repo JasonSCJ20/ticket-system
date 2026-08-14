@@ -4,6 +4,7 @@ import { Op } from 'sequelize';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let platformAdminToken;
 let ordinaryAdminToken;
@@ -40,9 +41,9 @@ beforeAll(async () => {
   });
 
   const platformLogin = await request(app).post('/api/token').send({ username: 'platform_admin_test', password: 'password123' });
-  platformAdminToken = platformLogin.body.access_token;
+  platformAdminToken = extractAuthCookie(platformLogin);
   const ordinaryLogin = await request(app).post('/api/token').send({ username: 'ordinary_admin_test', password: 'password123' });
-  ordinaryAdminToken = ordinaryLogin.body.access_token;
+  ordinaryAdminToken = extractAuthCookie(ordinaryLogin);
 });
 
 afterAll(async () => {
@@ -53,7 +54,7 @@ describe('POST /api/platform/organizations', () => {
   it('rejects a non-platform_admin, even an ordinary admin', async () => {
     const res = await request(app)
       .post('/api/platform/organizations')
-      .set('Authorization', `Bearer ${ordinaryAdminToken}`)
+      .set('Cookie', ordinaryAdminToken)
       .send({ name: 'Should Fail Inc', slug: 'should-fail' });
     expect(res.status).toBe(403);
   });
@@ -61,7 +62,7 @@ describe('POST /api/platform/organizations', () => {
   it('creates a real new organization as a platform admin', async () => {
     const res = await request(app)
       .post('/api/platform/organizations')
-      .set('Authorization', `Bearer ${platformAdminToken}`)
+      .set('Cookie', platformAdminToken)
       .send({ name: 'New Customer Inc', slug: `new-customer-${Date.now()}` });
     expect(res.status).toBe(201);
     expect(res.body.name).toBe('New Customer Inc');
@@ -72,13 +73,13 @@ describe('POST /api/platform/organizations', () => {
     const slug = `dup-org-${Date.now()}`;
     const first = await request(app)
       .post('/api/platform/organizations')
-      .set('Authorization', `Bearer ${platformAdminToken}`)
+      .set('Cookie', platformAdminToken)
       .send({ name: 'Dup Org', slug });
     expect(first.status).toBe(201);
 
     const second = await request(app)
       .post('/api/platform/organizations')
-      .set('Authorization', `Bearer ${platformAdminToken}`)
+      .set('Cookie', platformAdminToken)
       .send({ name: 'Dup Org Again', slug });
     expect(second.status).toBe(409);
   });
@@ -92,7 +93,7 @@ describe('Full onboarding lifecycle: create org, issue admin, forced password ch
   it('creates the organization', async () => {
     const res = await request(app)
       .post('/api/platform/organizations')
-      .set('Authorization', `Bearer ${platformAdminToken}`)
+      .set('Cookie', platformAdminToken)
       .send({ name: 'Lifecycle Test Org', slug: `lifecycle-${Date.now()}` });
     expect(res.status).toBe(201);
     newOrgId = res.body.id;
@@ -102,7 +103,7 @@ describe('Full onboarding lifecycle: create org, issue admin, forced password ch
     newAdminEmail = `lifecycle-admin-${Date.now()}@example.com`;
     const res = await request(app)
       .post(`/api/platform/organizations/${newOrgId}/admins`)
-      .set('Authorization', `Bearer ${platformAdminToken}`)
+      .set('Cookie', platformAdminToken)
       .send({ name: 'Lifecycle', surname: 'Admin', email: newAdminEmail });
     expect(res.status).toBe(201);
     expect(res.body.organizationId).toBe(newOrgId);
@@ -133,17 +134,17 @@ describe('Full onboarding lifecycle: create org, issue admin, forced password ch
     const login = await request(app).post('/api/token').send({ username: 'Lifecycle Admin', password: knownTempPassword });
     expect(login.status).toBe(200);
     expect(login.body.mustChangePassword).toBe(true);
-    const newAdminToken = login.body.access_token;
+    const newAdminToken = extractAuthCookie(login);
 
     const blocked = await request(app)
       .get('/api/users')
-      .set('Authorization', `Bearer ${newAdminToken}`);
+      .set('Cookie', newAdminToken);
     expect(blocked.status).toBe(428);
     expect(blocked.body.mustChangePassword).toBe(true);
 
     const changeResult = await request(app)
       .post('/api/auth/change-password')
-      .set('Authorization', `Bearer ${newAdminToken}`)
+      .set('Cookie', newAdminToken)
       .send({ currentPassword: knownTempPassword, newPassword: 'A-Real-New-Password-1!' });
     expect(changeResult.status).toBe(200);
 
@@ -156,7 +157,7 @@ describe('Full onboarding lifecycle: create org, issue admin, forced password ch
     // Same token, now unblocked — mustChangePassword was cleared server-side.
     const unblocked = await request(app)
       .get('/api/users')
-      .set('Authorization', `Bearer ${newAdminToken}`);
+      .set('Cookie', newAdminToken);
     expect(unblocked.status).toBe(200);
   });
 });

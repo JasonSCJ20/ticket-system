@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let adminToken;
 let ownerToken;
@@ -77,15 +78,15 @@ beforeAll(async () => {
   });
 
   const adminLogin = await request(app).post('/api/token').send({ username: 'admin_visitor_test', password: 'password123' });
-  adminToken = adminLogin.body.access_token;
+  adminToken = extractAuthCookie(adminLogin);
   const ownerLogin = await request(app).post('/api/token').send({ username: 'owner_visitor_test', password: 'password123' });
-  ownerToken = ownerLogin.body.access_token;
+  ownerToken = extractAuthCookie(ownerLogin);
   const otherOwnerLogin = await request(app).post('/api/token').send({ username: 'other_owner_visitor_test', password: 'password123' });
-  otherOwnerToken = otherOwnerLogin.body.access_token;
+  otherOwnerToken = extractAuthCookie(otherOwnerLogin);
 
   const keyRes = await request(app)
     .post(`/api/security/applications/${assetId}/agent-key`)
-    .set('Authorization', `Bearer ${adminToken}`);
+    .set('Cookie', adminToken);
   agentKey = keyRes.body.agentKey;
 });
 
@@ -132,7 +133,7 @@ describe('GET /security/applications/:id/visitors/summary', () => {
   it('admin sees the real aggregate counts', async () => {
     const res = await request(app)
       .get(`/api/security/applications/${assetId}/visitors/summary`)
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
     expect(res.status).toBe(200);
     expect(res.body.last24h.totalVisits).toBe(3);
     expect(res.body.last24h.uniqueIps).toBe(2);
@@ -141,7 +142,7 @@ describe('GET /security/applications/:id/visitors/summary', () => {
   it('the owning owner can see their own asset visitor summary', async () => {
     const res = await request(app)
       .get(`/api/security/applications/${assetId}/visitors/summary`)
-      .set('Authorization', `Bearer ${ownerToken}`);
+      .set('Cookie', ownerToken);
     expect(res.status).toBe(200);
     expect(res.body.last24h.totalVisits).toBe(3);
   });
@@ -149,14 +150,14 @@ describe('GET /security/applications/:id/visitors/summary', () => {
   it('a different owner cannot see this asset\'s visitor summary', async () => {
     const res = await request(app)
       .get(`/api/security/applications/${assetId}/visitors/summary`)
-      .set('Authorization', `Bearer ${otherOwnerToken}`);
+      .set('Cookie', otherOwnerToken);
     expect(res.status).toBe(404);
   });
 
   it('an owner\'s own (empty) asset returns zero counts, not another org\'s data', async () => {
     const res = await request(app)
       .get(`/api/security/applications/${otherAssetId}/visitors/summary`)
-      .set('Authorization', `Bearer ${otherOwnerToken}`);
+      .set('Cookie', otherOwnerToken);
     expect(res.status).toBe(200);
     expect(res.body.last24h.totalVisits).toBe(0);
   });

@@ -4,6 +4,7 @@ import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { computeAuditHash, verifyAuditChain } from '../src/services/auditChain.js';
 import { runAsPlatformAdmin, runWithOrganization } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 let token;
 let defaultOrgId;
@@ -28,7 +29,7 @@ beforeAll(async () => {
     });
   });
   const res = await request(app).post('/api/token').send({ username: 'auditchain_admin', password: 'password123' });
-  token = res.body.access_token;
+  token = extractAuthCookie(res);
 });
 
 afterAll(async () => {
@@ -115,7 +116,7 @@ describe('AuditLog hash-chaining (real Sequelize model + hooks)', () => {
 
     const res = await request(app)
       .get('/api/governance/audit-logs/verify')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Cookie', token);
 
     expect(res.status).toBe(200);
     expect(res.body.valid).toBe(true);

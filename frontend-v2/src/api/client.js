@@ -9,25 +9,6 @@ const IS_LOCAL_HOST = /^(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\
 const DEFAULT_REMOTE_API_URL = 'https://soc-api.scratchsolidsolutions.org/api';
 export const API_URL = import.meta.env.VITE_API_URL || (IS_LOCAL_HOST ? '/api' : DEFAULT_REMOTE_API_URL);
 
-const TOKEN_KEY = 'access_token';
-
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
-}
-
-export function setToken(token) {
-  localStorage.setItem(TOKEN_KEY, token);
-}
-
-export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
-}
-
-function authHeaders() {
-  const token = getToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 // Human-friendly fallback per HTTP status, used only when the backend didn't
 // send a specific message — a status code alone tells a user nothing useful.
 const STATUS_FALLBACK_MESSAGES = {
@@ -89,9 +70,9 @@ export async function request(path, { method = 'GET', body, skipAuthRedirect = f
   try {
     response = await fetch(`${API_URL}${path}`, {
       method,
+      credentials: 'include', // sends/accepts the httpOnly auth cookie across the frontend/backend subdomains
       headers: {
         'Content-Type': 'application/json',
-        ...authHeaders(),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -100,7 +81,6 @@ export async function request(path, { method = 'GET', body, skipAuthRedirect = f
   }
 
   if (response.status === 401 && !skipAuthRedirect) {
-    clearToken();
     if (onUnauthorized) onUnauthorized();
     throw new Error('Your session expired. Please sign in again.');
   }
@@ -113,13 +93,11 @@ export async function request(path, { method = 'GET', body, skipAuthRedirect = f
 // Downloads a file response (reports, data exports) as a blob and saves it
 // via a temporary <a download> click — `request()` above always parses
 // JSON, so anything that returns a real file goes straight through fetch
-// with the same bearer-token auth header the rest of the app uses.
+// with the same auth cookie the rest of the app uses.
 export async function downloadFile(path, fallbackFilename) {
   let response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
-      headers: { ...authHeaders() },
-    });
+    response = await fetch(`${API_URL}${path}`, { credentials: 'include' });
   } catch {
     throw new Error(`Unable to reach the API at ${API_URL}. Check the backend URL and CORS configuration.`);
   }

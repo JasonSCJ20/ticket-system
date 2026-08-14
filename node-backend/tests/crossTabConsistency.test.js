@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import app, { ready } from '../src/app.js';
 import { sequelize } from '../src/models/index.js';
 import { runAsPlatformAdmin } from '../src/services/tenantContext.js';
+import { extractAuthCookie } from './helpers/authCookie.js';
 
 // Guards the fix for a real cross-tab discrepancy: the Overview/Dashboard
 // page used to fetch GET /security/findings with no filters (capped at a
@@ -93,7 +94,7 @@ beforeAll(async () => {
     });
 
     const login = await request(app).post('/api/token').send({ username: 'admin_crosstab_test', password: 'password123' });
-    adminToken = login.body.access_token;
+    adminToken = extractAuthCookie(login);
   });
 });
 
@@ -105,21 +106,21 @@ describe('GET /security/findings — multi-value status/severity filters (Dashbo
   it('rejects an invalid status value', async () => {
     const res = await request(app)
       .get('/api/security/findings?status=not-a-real-status')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
     expect(res.status).toBe(422);
   });
 
   it('rejects an invalid severity value', async () => {
     const res = await request(app)
       .get('/api/security/findings?severity=super-critical')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
     expect(res.status).toBe(422);
   });
 
   it('returns the genuinely open, high-severity finding even with a pile of higher-scoring resolved noise ahead of it', async () => {
     const res = await request(app)
       .get('/api/security/findings?status=new,investigating&severity=high,critical')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set('Cookie', adminToken);
     expect(res.status).toBe(200);
     const titles = res.body.map((f) => f.title);
     expect(titles).toContain('Genuinely open critical finding');
@@ -130,16 +131,16 @@ describe('GET /security/findings — multi-value status/severity filters (Dashbo
   it('matches the count a real Findings-tab-style single-status fetch would show', async () => {
     const dashboardStyle = await request(app)
       .get('/api/security/findings?status=new,investigating&severity=high,critical')
-      .set('Authorization', `Bearer ${adminToken}`)
+      .set('Cookie', adminToken)
       .then((r) => r.body);
 
     const findingsTabNew = await request(app)
       .get('/api/security/findings?status=new')
-      .set('Authorization', `Bearer ${adminToken}`)
+      .set('Cookie', adminToken)
       .then((r) => r.body);
     const findingsTabInvestigating = await request(app)
       .get('/api/security/findings?status=investigating')
-      .set('Authorization', `Bearer ${adminToken}`)
+      .set('Cookie', adminToken)
       .then((r) => r.body);
 
     const independentCount = [...findingsTabNew, ...findingsTabInvestigating]

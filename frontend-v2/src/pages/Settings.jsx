@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext.jsx';
 import { useActionFeedback } from '../hooks/useActionFeedback.js';
 import { updateProfile, fetchMfaSetup, enableMfa, disableMfa, exportMyData, deleteMyAccount } from '../api/auth.js';
-import { setToken } from '../api/client.js';
 import { Card, Chip, FeedbackBanner } from '../components/ui.jsx';
 
 const AUDIENCE_OPTIONS = [
@@ -75,7 +74,8 @@ export default function Settings() {
         telegramChatId: form.telegramChatId.trim(),
         operationalTeams: isStaff ? form.operationalTeams : [],
       });
-      if (result.access_token) setToken(result.access_token);
+      // The backend reissues the auth cookie itself when audienceCode/role
+      // changes (see PATCH /api/me/profile) — nothing for this code to store.
       setProfile((p) => ({ ...p, ...result }));
       notifySuccess('Profile updated.');
     } catch (err) {
