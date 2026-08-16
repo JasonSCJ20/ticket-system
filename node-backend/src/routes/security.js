@@ -8,6 +8,7 @@ import { TOOL_REGISTRY, getToolRegistryEntryByName } from '../services/toolRegis
 import { getLiveFeed, getThreatOrigins, getReconDetections } from '../services/socLiveFeed.js';
 import { probeApplicationRuntime } from '../services/livenessProbe.js';
 import { createDeviceProbe } from '../services/scanners/deviceProbe.js';
+import { getTenantContext } from '../services/tenantContext.js';
 
 const router = express.Router();
 const SCJ_ID_REGEX = /^\d{8}-\d{5}$/;
@@ -49,13 +50,28 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
   let analyticsCacheVersion = 0;
   const analyticsCache = new Map();
 
+  // These cache keys used to be a bare string ('health-summary',
+  // 'fortress-posture', etc) with no tenant component at all — meaning
+  // organization A's cached response (which can include real staff
+  // usernames, ticket counts, and finding detail) could be served straight
+  // back to organization B's request for the same route within the TTL
+  // window. Tenant context is established by authMiddleware before any
+  // route body runs (see services/tenantContext.js), so every cache
+  // key is namespaced to it here, once, rather than trusting every call
+  // site to remember to do it themselves.
+  const scopedCacheKey = (key) => {
+    const ctx = getTenantContext();
+    return `${ctx?.isPlatformAdmin ? 'platform-admin' : (ctx?.organizationId ?? 'no-context')}:${key}`;
+  };
+
   const readAnalyticsCache = (key) => {
-    const entry = analyticsCache.get(key);
+    const scopedKey = scopedCacheKey(key);
+    const entry = analyticsCache.get(scopedKey);
     if (!entry) return null;
 
     const isExpired = (Date.now() - entry.createdAt) > ANALYTICS_CACHE_TTL_MS;
     if (isExpired || entry.version !== analyticsCacheVersion) {
-      analyticsCache.delete(key);
+      analyticsCache.delete(scopedKey);
       return null;
     }
 
@@ -63,7 +79,7 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
   };
 
   const writeAnalyticsCache = (key, payload) => {
-    analyticsCache.set(key, {
+    analyticsCache.set(scopedCacheKey(key), {
       payload,
       version: analyticsCacheVersion,
       createdAt: Date.now(),
@@ -1420,15 +1436,15 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     const cached = readAnalyticsCache(cacheKey);
     if (cached) return res.json(cached);
 
-    const [applications, openTickets] = await Promise.all([
+    const [applications, openTickets, devices] = await Promise.all([
       ApplicationAsset.findAll({
         include: [{ model: SecurityFinding, as: 'findings', required: false }],
         order: [['name', 'ASC']],
       }),
       Ticket.count({ where: { status: { [Op.in]: ['open', 'in_progress'] } } }),
+      NetworkDevice.findAll(),
     ]);
 
-    const now = Date.now();
     const networkFindings = applications.flatMap((app) => (Array.isArray(app.findings) ? app.findings : [])
       .filter((f) => ['network', 'intrusion', 'availability'].includes(f.category))
       .map((f) => ({ ...f.toJSON(), applicationName: app.name, applicationId: app.id })));
@@ -1437,70 +1453,42 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
     const criticalNetworkFindings = activeNetworkFindings.filter((f) => f.severity === 'critical').length;
     const highNetworkFindings = activeNetworkFindings.filter((f) => f.severity === 'high').length;
 
+    // Every number here comes straight off real NetworkDevice rows — this
+    // used to synthesize plausible-looking router/AP/endpoint counts (and a
+    // "Suricata"/"Zeek"/etc sensor list with invented eventsLast24h numbers)
+    // from a formula. None of those tools are actually integrated, so that
+    // was dashboard-only fabrication implying live telemetry that didn't
+    // exist. Real registered-device counts and real per-device
+    // idsIpsEnabled/passiveScanEnabled config are the honest substitute —
+    // an org with no devices registered yet correctly sees zeroes, not
+    // invented activity.
+    const byType = devices.reduce((acc, d) => {
+      acc[d.deviceType] = (acc[d.deviceType] || 0) + 1;
+      return acc;
+    }, {});
     const inventory = {
-      routers: Math.max(2, Math.ceil(applications.length * 0.75) + 1),
-      accessPoints: Math.max(3, applications.length + 2),
-      endpoints: Math.max(25, (applications.length * 18) + (openTickets * 2)),
-      unknownDevices: Math.max(0, activeNetworkFindings.filter((f) => f.category === 'intrusion').length - 1),
-      offlineDevices: applications.filter((app) => ['critical', 'degraded'].includes(app.healthStatus)).length,
+      registeredDevices: devices.length,
+      byType,
+      online: devices.filter((d) => d.state === 'online').length,
+      offline: devices.filter((d) => d.state === 'offline').length,
+      unknown: devices.filter((d) => d.state === 'unknown').length,
     };
 
-    const sensors = [
-      {
-        name: 'Suricata IDS/IPS',
-        status: activeNetworkFindings.length > 0 ? 'healthy' : 'watch',
-        coverage: 'North-South + East-West signatures',
-        eventsLast24h: Math.max(8, networkFindings.length * 4),
-        lastSeenAt: new Date(now - (4 * 60 * 1000)).toISOString(),
-      },
-      {
-        name: 'Zeek Network Sensor',
-        status: 'healthy',
-        coverage: 'Protocol metadata and behavioral anomalies',
-        eventsLast24h: Math.max(12, networkFindings.length * 3),
-        lastSeenAt: new Date(now - (7 * 60 * 1000)).toISOString(),
-      },
-      {
-        name: 'NetFlow/sFlow Collector',
-        status: applications.length > 0 ? 'healthy' : 'watch',
-        coverage: 'Flow-level visibility and top talkers',
-        eventsLast24h: Math.max(25, applications.length * 15),
-        lastSeenAt: new Date(now - (5 * 60 * 1000)).toISOString(),
-      },
-      {
-        name: 'SNMP Polling + Traps',
-        status: inventory.offlineDevices > 0 ? 'watch' : 'healthy',
-        coverage: 'Routers, APs, and interface telemetry',
-        eventsLast24h: Math.max(15, applications.length * 10),
-        lastSeenAt: new Date(now - (9 * 60 * 1000)).toISOString(),
-      },
-      {
-        name: 'Syslog Ingestion',
-        status: 'healthy',
-        coverage: 'Firewall, routers, AP controller events',
-        eventsLast24h: Math.max(50, applications.length * 18),
-        lastSeenAt: new Date(now - (2 * 60 * 1000)).toISOString(),
-      },
-      {
-        name: 'Wireshark Capture Pipeline',
-        status: activeNetworkFindings.length > 0 ? 'watch' : 'healthy',
-        coverage: 'Ring-buffer packet capture for investigations',
-        eventsLast24h: Math.max(2, Math.ceil(activeNetworkFindings.length / 2)),
-        lastSeenAt: new Date(now - (11 * 60 * 1000)).toISOString(),
-      },
-    ];
+    const idsIpsEnabledDevices = devices.filter((d) => d.idsIpsEnabled);
+    const passiveScanEnabledDevices = devices.filter((d) => d.passiveScanEnabled);
+    const mostRecent = (list, field) => list
+      .map((d) => d[field])
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || null;
 
-    const topTalkers = applications
-      .map((app) => {
-        const findings = Array.isArray(app.findings) ? app.findings : [];
-        const signal = findings.filter((f) => ['network', 'intrusion', 'availability'].includes(f.category)).length;
-        return {
-          label: app.name,
-          trafficIndex: Math.max(8, (signal * 14) + (app.healthStatus === 'critical' ? 20 : app.healthStatus === 'degraded' ? 10 : 4)),
-        };
-      })
-      .sort((a, b) => b.trafficIndex - a.trafficIndex)
-      .slice(0, 5);
+    const sensorCoverage = {
+      idsIpsEnabledDeviceCount: idsIpsEnabledDevices.length,
+      idsIpsCoveragePercent: devices.length ? Math.round((idsIpsEnabledDevices.length / devices.length) * 100) : 0,
+      lastIdsIpsEventAt: mostRecent(idsIpsEnabledDevices, 'lastIdsIpsEventAt'),
+      passiveScanEnabledDeviceCount: passiveScanEnabledDevices.length,
+      passiveScanCoveragePercent: devices.length ? Math.round((passiveScanEnabledDevices.length / devices.length) * 100) : 0,
+      lastPassiveScanAt: mostRecent(passiveScanEnabledDevices, 'lastPassiveScanAt'),
+    };
 
     const perApplication = applications.map((app) => {
       const findings = Array.isArray(app.findings) ? app.findings : [];
@@ -1558,9 +1546,8 @@ export default ({ models, runSweep, getSummary, notifyTicket }) => {
         openTickets,
       },
       inventory,
-      sensors,
+      sensorCoverage,
       trafficAnalytics: {
-        topTalkers,
         eastWestAnomalies: activeNetworkFindings.filter((f) => f.category === 'intrusion').length,
         externalExposureSignals: activeNetworkFindings.filter((f) => f.category === 'availability').length,
       },

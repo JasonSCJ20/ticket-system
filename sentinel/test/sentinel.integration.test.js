@@ -186,6 +186,51 @@ describe('sentinel() against a real CommandCentre backend', () => {
     instance.stop();
 
     expect(blockIp).toHaveBeenCalledWith('203.0.113.77');
+
+    const findings = await api('/security/findings?status=investigating');
+    const scanFinding = findings.body.find((f) => f.category === 'port_scan' && f.affectedAssetRef === '10.0.0.1');
+    expect(scanFinding).toBeTruthy();
+    expect(scanFinding.requiresManualConfirmation).toBe(false);
+  });
+
+  it('reports blocked:false when active mode intends to block but the real firewall call fails', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+    await api(`/security/applications/${assetId}/sentinel-mode`, { method: 'PATCH', body: { mode: 'active' } });
+
+    // Simulates the real-world failure mode the audit flagged: active mode
+    // intends to block, but the firewall call itself fails (e.g. missing
+    // CAP_NET_ADMIN) — `blocked` reported to CommandCentre must reflect that
+    // failure, not the mode's intent.
+    const blockIp = vi.fn().mockRejectedValue(new Error('EPERM: operation not permitted'));
+    const scannerConnections = Array.from({ length: 20 }, (_, i) => ({
+      remoteIp: '203.0.113.88', remotePort: 55000, localIp: '10.0.0.1', localPort: 3000 + i, state: 'ESTABLISHED',
+    }));
+
+    const instance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      firewall: { blockIp, unblockIp: vi.fn(), listBlockedIps: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => scannerConnections,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    instance.stop();
+
+    expect(blockIp).toHaveBeenCalledWith('203.0.113.88');
+
+    // A failed real block must NOT be reported as blocked:true — it must
+    // still require manual confirmation, same as shadow mode would.
+    const findings = await api('/security/findings?status=new');
+    const scanFinding = findings.body.find((f) => f.category === 'port_scan' && f.affectedAssetRef === '10.0.0.1' && f.title.includes('203.0.113.88'));
+    expect(scanFinding).toBeTruthy();
+    expect(scanFinding.requiresManualConfirmation).toBe(true);
   });
 
   it('detects an SSH brute-force pattern from real auth-log lines and blocks it once active', async () => {
@@ -462,5 +507,53 @@ describe('sentinel() against a real CommandCentre backend', () => {
 
     const pending = await api(`/security/applications/${assetId}/commands/pending`, { key: sentinelKey });
     expect(pending.body).toEqual([]); // acked, no longer pending
+  });
+
+  it('a fresh sentinel instance recovers an already-acknowledged block without a new command ever being issued', async () => {
+    const issued = await api(`/security/applications/${assetId}/sentinel-key`, { method: 'POST' });
+    const sentinelKey = issued.body.sentinelKey;
+    await api(`/security/applications/${assetId}/sentinel-heartbeat`, { method: 'POST', key: sentinelKey, body: {} });
+
+    await api(`/security/applications/${assetId}/commands`, {
+      method: 'POST',
+      body: { action: 'block_ip', target: '198.51.100.201', reason: 'resync test' },
+    });
+
+    const firstBlockIp = vi.fn().mockResolvedValue(undefined);
+    const firstInstance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100,
+      scanCheckIntervalMs: 100_000,
+      firewall: { blockIp: firstBlockIp, unblockIp: vi.fn(), listBlockedIps: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(firstBlockIp).toHaveBeenCalledWith('198.51.100.201');
+    firstInstance.stop();
+
+    // A brand-new instance — no polling has happened yet, no knowledge of
+    // the (already-acked) block at all — must recover it during its own
+    // startup resync, before its first command poll would even run.
+    const secondBlockIp = vi.fn().mockResolvedValue(undefined);
+    const secondInstance = sentinel({
+      assetId,
+      sentinelKey,
+      commandCentreUrl: apiBaseUrl,
+      heartbeatIntervalMs: 100_000,
+      commandPollIntervalMs: 100_000,
+      scanCheckIntervalMs: 100_000,
+      firewall: { blockIp: secondBlockIp, unblockIp: vi.fn(), listBlockedIps: vi.fn() },
+      readOpenPorts: () => [],
+      readConnections: () => [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(secondBlockIp).toHaveBeenCalledWith('198.51.100.201');
+    secondInstance.stop();
   });
 });

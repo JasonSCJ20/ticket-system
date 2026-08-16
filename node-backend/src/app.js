@@ -50,12 +50,14 @@ import webhooksRouteFactory from './routes/webhooks.js';
 import platformRouteFactory from './routes/platform.js';
 import { runSecuritySweep, healthSummary, resolveNetworkFallbackAsset, DEFAULT_SCANNERS } from './services/securityEngine.js';
 import { runDowntimeSweep } from './services/downtimeMonitor.js';
+import { checkSlaBreaches } from './services/slaEnforcement.js';
 import { evaluateLoginGeo } from './services/loginAnomaly.js';
 import { recordScanRun } from './services/scanRunLedger.js';
 import { pushScanToolEvent } from './services/socLiveFeed.js';
 import { recordToolSchedulerRun } from './services/toolRegistry.js';
 import { createDeviceProbe } from './services/scanners/deviceProbe.js';
 import { verifyAuditChain } from './services/auditChain.js';
+import { monitorAuditChain } from './services/auditChainMonitor.js';
 import { logger, requestLoggingMiddleware } from './logger.js';
 import { createErrorHandler } from './services/errorHandler.js';
 import { createNotificationThrottle } from './services/notificationThrottle.js';
@@ -1583,6 +1585,41 @@ async function setup() {
       },
       notifyTicket: notify,
     }).catch((err) => logger.error({ err }, 'Downtime sweep failed')));
+  });
+
+  // SLA breaches used to be a display-only number on the dashboard — nothing
+  // ever acted on one. Every 15 minutes, catch any ticket that just missed
+  // its SLA and actually do something about it.
+  cron.schedule('*/15 * * * *', async () => {
+    await forEachOrganization(() => checkSlaBreaches({
+      models: { Ticket: ticketModel, TicketHistory: ticketHistoryModel, User: userModel, AuditLog: auditLogModel },
+      notify: async ({ ticket, assignee }) => {
+        const text = `SLA breached — Ticket #${ticket.id}: ${ticket.title}\nPriority: ${ticket.priority}\nSLA was due: ${ticket.slaDueAt.toISOString()}`;
+        if (assignee) await sendTelegramToUser(assignee, text).catch(() => {});
+        const managers = await getTicketManagers();
+        for (const manager of managers) {
+          await sendTelegramToUser(manager, text).catch(() => {});
+        }
+      },
+    }).catch((err) => logger.error({ err }, 'SLA breach check failed')));
+  });
+
+  // The audit log's hash chain has always been computed automatically on
+  // every insert, but verifying it was manual-only — a human clicking
+  // "verify" on the Governance page was the only way tampering would ever
+  // be noticed. Runs daily instead of waiting on that.
+  cron.schedule('0 3 * * *', async () => {
+    await forEachOrganization(() => monitorAuditChain({
+      models: { AuditLog: auditLogModel },
+      alert: async (result) => {
+        const text = `Audit log tamper detected — verification broke at row #${result.brokenAtId} (${result.totalChecked} rows checked). Investigate immediately: this means an audit log entry was altered or deleted after being written.`;
+        const managers = await getTicketManagers();
+        for (const manager of managers) {
+          await sendTelegramToUser(manager, text).catch(() => {});
+        }
+        logger.error({ result }, 'Audit chain verification failed');
+      },
+    }).catch((err) => logger.error({ err }, 'Audit chain monitor failed')));
   });
 
   if (CONFIG.AUTOMATION_NETWORK_ENABLED) {

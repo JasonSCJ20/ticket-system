@@ -656,6 +656,35 @@ export default ({ models, authMiddleware, notifyTicket }) => {
     return res.json(commands);
   });
 
+  // Both the embedded agent's and sentinel's block lists live only in
+  // memory, populated from /commands/pending — which only ever returns
+  // still-pending commands. Once a block_ip command is acked, a restarted
+  // process has no way to learn it was ever issued, silently un-blocking an
+  // IP that's still supposed to be blocked. This replays the asset's full
+  // command history (every acknowledged block/unblock, not just pending
+  // ones) so a freshly-started agent/sentinel can reconstruct real current
+  // state once at startup, before its normal poll loop takes over.
+  router.get('/:id/commands/active-blocks', eitherKeyAuth, async (req, res) => {
+    const commands = await AgentCommand.findAll({
+      where: {
+        applicationAssetId: req.asset.id,
+        status: 'acknowledged',
+        action: { [Op.in]: ['block_ip', 'unblock_ip', 'block_session'] },
+      },
+      order: [['id', 'ASC']],
+    });
+
+    const blockedIps = new Set();
+    const blockedSessions = new Set();
+    for (const command of commands) {
+      if (command.action === 'block_ip') blockedIps.add(command.target);
+      else if (command.action === 'unblock_ip') blockedIps.delete(command.target);
+      else if (command.action === 'block_session') blockedSessions.add(command.target);
+    }
+
+    return res.json({ blockedIps: Array.from(blockedIps), blockedSessions: Array.from(blockedSessions) });
+  });
+
   router.post('/:id/commands/:commandId/ack', eitherKeyAuth, param('commandId').isInt(), async (req, res) => {
     const command = await AgentCommand.findOne({ where: { id: req.params.commandId, applicationAssetId: req.asset.id } });
     if (!command) return res.status(404).json({ error: 'Command not found' });

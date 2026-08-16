@@ -40,6 +40,7 @@ const EVENT_LABELS = {
   action_item_created: 'Action item added',
   action_item_updated: 'Action item updated',
   finding_status_update: 'Linked finding updated',
+  sla_breached: 'SLA breached',
 };
 
 function buildTimeline(ticket, historyRows) {

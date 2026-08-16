@@ -26,6 +26,7 @@ export function createClient({ commandCentreUrl, assetId, agentKey }) {
     reportFinding: (finding) => call('/agent-report', { method: 'POST', body: { type: 'finding', ...finding } }),
     reportVisits: (visits) => call('/visit-report', { method: 'POST', body: { visits } }),
     fetchPendingCommands: () => call('/commands/pending'),
+    fetchActiveBlocks: () => call('/commands/active-blocks'),
     ackCommand: (commandId) => call(`/commands/${commandId}/ack`, { method: 'POST' }),
   };
 }

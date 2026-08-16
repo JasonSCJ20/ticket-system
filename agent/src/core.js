@@ -79,12 +79,28 @@ export function createAgentCore({ assetId, agentKey, commandCentreUrl, heartbeat
     }
   }
 
+  // blockedIps/blockedSessions only ever grew from still-pending commands —
+  // once a command was acked, a restarted process had no way to learn it
+  // was ever issued, silently un-blocking an IP that was still supposed to
+  // be blocked. Called once at startup, before the normal poll loop takes
+  // over: replays the asset's full command history (not just pending) to
+  // reconstruct the real current state.
+  async function resyncActiveBlocks() {
+    try {
+      const active = await client.fetchActiveBlocks();
+      for (const ip of active?.blockedIps || []) blockedIps.add(ip);
+      for (const sessionId of active?.blockedSessions || []) blockedSessions.add(sessionId);
+    } catch (err) {
+      console.error('[commandcentre-agent] active-block resync failed:', err.message);
+    }
+  }
+
   const heartbeatTimer = setInterval(runHeartbeat, heartbeatIntervalMs);
   const commandPollTimer = setInterval(runCommandPoll, commandPollIntervalMs);
   heartbeatTimer.unref?.();
   commandPollTimer.unref?.();
   runHeartbeat();
-  runCommandPoll();
+  resyncActiveBlocks().then(runCommandPoll);
 
   return {
     client,

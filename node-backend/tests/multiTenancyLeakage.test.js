@@ -188,4 +188,26 @@ describe('Multi-tenancy: cross-organization data isolation (real HTTP, real orgs
       .set('Cookie', orgAToken)
       .send({ active: false });
   });
+
+  // The routes backed by readAnalyticsCache/writeAnalyticsCache (network
+  // visibility, health summary, fortress posture, threat intel, database
+  // overview) used to cache under a bare string key with no tenant
+  // component at all — meaning tenant B's request, made shortly after
+  // tenant A's, could receive tenant A's cached response verbatim within
+  // the cache TTL. Calling A then B back-to-back (well inside the 12s TTL)
+  // is exactly the scenario that would have leaked before the cache key
+  // was scoped to the requester's own tenant context.
+  it('the analytics cache never serves one tenant\'s cached response to another', async () => {
+    const resA = await request(app).get('/api/security/network-visibility/overview').set('Cookie', orgAToken);
+    expect(resA.status).toBe(200);
+    const appsA = resA.body.perApplication.map((a) => a.applicationName);
+    expect(appsA).toContain('tenant-a-secret-asset');
+    expect(appsA).not.toContain('tenant-b-secret-asset');
+
+    const resB = await request(app).get('/api/security/network-visibility/overview').set('Cookie', orgBToken);
+    expect(resB.status).toBe(200);
+    const appsB = resB.body.perApplication.map((a) => a.applicationName);
+    expect(appsB).toContain('tenant-b-secret-asset');
+    expect(appsB).not.toContain('tenant-a-secret-asset');
+  });
 });

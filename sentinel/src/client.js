@@ -23,6 +23,7 @@ export function createClient({ commandCentreUrl, assetId, sentinelKey }) {
     heartbeat: (openPorts) => call('/sentinel-heartbeat', { method: 'POST', body: { openPorts } }),
     reportFinding: (finding) => call('/sentinel-report', { method: 'POST', body: finding }),
     fetchPendingCommands: () => call('/commands/pending'),
+    fetchActiveBlocks: () => call('/commands/active-blocks'),
     ackCommand: (commandId) => call(`/commands/${commandId}/ack`, { method: 'POST' }),
   };
 }

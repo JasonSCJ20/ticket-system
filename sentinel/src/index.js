@@ -122,11 +122,17 @@ export function sentinel(options) {
       for (const scan of flagged) {
         if (locallyBlockedIps.has(scan.sourceIp)) continue; // already handled
 
-        const willBlock = currentMode === 'active';
-        if (willBlock) {
+        // `blocked` reported below must reflect whether the firewall call
+        // actually succeeded, not just whether this mode intends to block —
+        // otherwise a permission/exec failure (e.g. missing CAP_NET_ADMIN)
+        // silently surfaces as a false "blocked: true" on the dashboard.
+        const shouldBlock = currentMode === 'active';
+        let actuallyBlocked = false;
+        if (shouldBlock) {
           try {
             await firewall.blockIp(scan.sourceIp);
             locallyBlockedIps.add(scan.sourceIp);
+            actuallyBlocked = true;
           } catch (err) {
             console.error('[commandcentre-sentinel] firewall block failed:', err.message);
           }
@@ -139,7 +145,7 @@ export function sentinel(options) {
             title: `Port scan detected from ${scan.sourceIp}`,
             description: `${scan.sourceIp} touched ${scan.portCount} distinct local ports in the last minute (${scan.ports.slice(0, 10).join(', ')}${scan.ports.length > 10 ? ', …' : ''}).`,
             sourceIp: scan.sourceIp,
-            blocked: willBlock,
+            blocked: actuallyBlocked,
             evidence: JSON.stringify(scan),
           })
           .catch((err) => console.error('[commandcentre-sentinel] scan report failed:', err.message));
@@ -177,11 +183,13 @@ export function sentinel(options) {
       for (const brute of flagged) {
         if (locallyBlockedIps.has(brute.sourceIp)) continue; // already handled
 
-        const willBlock = currentMode === 'active';
-        if (willBlock) {
+        const shouldBlock = currentMode === 'active';
+        let actuallyBlocked = false;
+        if (shouldBlock) {
           try {
             await firewall.blockIp(brute.sourceIp);
             locallyBlockedIps.add(brute.sourceIp);
+            actuallyBlocked = true;
           } catch (err) {
             console.error('[commandcentre-sentinel] firewall block failed:', err.message);
           }
@@ -194,7 +202,7 @@ export function sentinel(options) {
             title: `SSH brute-force attempt from ${brute.sourceIp}`,
             description: `${brute.sourceIp} made ${brute.attemptCount} failed SSH login attempt(s) in the last ${Math.round(authWindowMs / 60_000)} minute(s), targeting user(s): ${brute.users.join(', ')}.`,
             sourceIp: brute.sourceIp,
-            blocked: willBlock,
+            blocked: actuallyBlocked,
             evidence: JSON.stringify(brute),
           })
           .catch((err) => console.error('[commandcentre-sentinel] brute-force report failed:', err.message));
@@ -226,11 +234,13 @@ export function sentinel(options) {
       for (const beacon of beacons) {
         if (locallyBlockedOutboundIps.has(beacon.remoteIp)) continue;
 
-        const willBlock = currentMode === 'active';
-        if (willBlock) {
+        const shouldBlock = currentMode === 'active';
+        let actuallyBlocked = false;
+        if (shouldBlock) {
           try {
             await firewall.blockOutboundIp(beacon.remoteIp);
             locallyBlockedOutboundIps.add(beacon.remoteIp);
+            actuallyBlocked = true;
           } catch (err) {
             console.error('[commandcentre-sentinel] outbound firewall block failed:', err.message);
           }
@@ -243,7 +253,7 @@ export function sentinel(options) {
             title: `Possible C2 beaconing to ${beacon.remoteIp}:${beacon.remotePort}`,
             description: `This host connected to ${beacon.remoteIp}:${beacon.remotePort} ${beacon.occurrences} times at a suspiciously regular ~${Math.round(beacon.intervalMs / 1000)}s interval — a pattern typical of scripted command-and-control check-ins rather than normal application traffic.`,
             sourceIp: beacon.remoteIp,
-            blocked: willBlock,
+            blocked: actuallyBlocked,
             evidence: JSON.stringify(beacon),
           })
           .catch((err) => console.error('[commandcentre-sentinel] beacon report failed:', err.message));
@@ -318,6 +328,30 @@ export function sentinel(options) {
     }
   }
 
+  // locallyBlockedIps only ever grew from still-pending commands — once a
+  // block_ip was acked, a restarted sentinel had no way to learn it was
+  // ever issued, so it would never call firewall.blockIp() again even
+  // though the real iptables rule (or a fresh boot with none applied yet)
+  // may no longer reflect it. Called once at startup: replays the asset's
+  // full acknowledged command history and re-applies any IP that should
+  // still be blocked, rather than trusting local memory alone.
+  async function resyncActiveBlocks() {
+    try {
+      const active = await client.fetchActiveBlocks();
+      for (const ip of active?.blockedIps || []) {
+        if (locallyBlockedIps.has(ip)) continue;
+        try {
+          await firewall.blockIp(ip);
+          locallyBlockedIps.add(ip);
+        } catch (err) {
+          console.error('[commandcentre-sentinel] resync block failed:', err.message);
+        }
+      }
+    } catch (err) {
+      console.error('[commandcentre-sentinel] active-block resync failed:', err.message);
+    }
+  }
+
   const heartbeatTimer = setInterval(runHeartbeat, heartbeatIntervalMs);
   const scanCheckTimer = setInterval(runScanCheck, scanCheckIntervalMs);
   const authLogCheckTimer = setInterval(runAuthLogCheck, authLogCheckIntervalMs);
@@ -348,7 +382,7 @@ export function sentinel(options) {
     runOutboundCheck();
     runFimCheck();
     runProcessCheck();
-    runCommandPoll();
+    resyncActiveBlocks().then(runCommandPoll);
   });
 
   return {
