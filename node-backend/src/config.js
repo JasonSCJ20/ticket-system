@@ -77,6 +77,13 @@ export const CONFIG = {
   MANAGER_EMAIL: process.env.MANAGER_EMAIL || '',
   MANAGER_TELEGRAM_NUMBER: process.env.MANAGER_TELEGRAM_NUMBER || '',
   CONNECTOR_SHARED_SECRET: process.env.CONNECTOR_SHARED_SECRET || '',
+  // Verified against Telegram's own X-Telegram-Bot-Api-Secret-Token header
+  // (set via the secret_token parameter on a real setWebhook call) — see
+  // routes/webhooks.js. Deliberately optional here (not fatal like the
+  // secrets below) so this fix can deploy without taking the live bot down
+  // before the secret is actually registered with Telegram.
+  TELEGRAM_WEBHOOK_SECRET: process.env.TELEGRAM_WEBHOOK_SECRET || '',
+  TELEGRAM_WEBHOOK_RATE_LIMIT_MAX: Number(process.env.TELEGRAM_WEBHOOK_RATE_LIMIT_MAX || 120),
   WAZUH_API_URL: process.env.WAZUH_API_URL || '',
   WAZUH_API_USERNAME: process.env.WAZUH_API_USERNAME || '',
   WAZUH_API_PASSWORD: process.env.WAZUH_API_PASSWORD || '',

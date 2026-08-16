@@ -752,6 +752,39 @@ describe('Route Module Coverage', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
   });
+
+  it('drives a full /newticket conversation through the webhook and actually creates a real ticket', async () => {
+    // Regression test: this whole flow 500'd unconditionally before the
+    // webhook handler was wrapped in a real tenant context (User/Ticket/
+    // TicketHistory are all tenant-scoped and throw without one) — every
+    // step below must keep succeeding, not just the first.
+    const telegramFromId = Date.now();
+    const send = (text) => request(app)
+      .post('/webhook/telegram')
+      .send({ message: { chat: { id: telegramFromId }, from: { id: telegramFromId, first_name: 'WebhookTestUser' }, text } });
+
+    const step1 = await send('/newticket');
+    expect(step1.status).toBe(200);
+
+    const step2 = await send('Webhook test incident title');
+    expect(step2.status).toBe(200);
+
+    const step3 = await send('Webhook test incident description');
+    expect(step3.status).toBe(200);
+
+    const step4 = await send('high');
+    expect(step4.status).toBe(200);
+
+    const step5 = await send('unassigned-webhook-test-user');
+    expect(step5.status).toBe(200);
+
+    const created = await runWithOrganization(defaultOrgId, () => sequelize.models.Ticket.findOne({
+      where: { title: 'Webhook test incident title' },
+    }));
+    expect(created).toBeTruthy();
+    expect(created.description).toBe('Webhook test incident description');
+    expect(created.priority).toBe('high');
+  });
 });
 
 describe('Scan Queue Throughput', () => {

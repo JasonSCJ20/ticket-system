@@ -1,4 +1,19 @@
+import crypto from 'crypto';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
+import { CONFIG } from '../config.js';
+import { runWithOrganization } from '../services/tenantContext.js';
+
+// Same constant-time comparison already used for the Wazuh/Suricata
+// connector webhooks (see routes/securityConnectors.js) — a plain !== would
+// leak timing information about how many leading bytes matched.
+function hasValidTelegramSecret(receivedHeader, expectedSecret) {
+  if (!expectedSecret) return false;
+  const received = Buffer.from(String(receivedHeader || ''), 'utf8');
+  const expected = Buffer.from(expectedSecret, 'utf8');
+  if (received.length !== expected.length) return false;
+  return crypto.timingSafeEqual(received, expected);
+}
 
 export default function webhooksRouteFactory({
   sanitizeString,
@@ -10,10 +25,46 @@ export default function webhooksRouteFactory({
   ticketHistoryModel,
   notify,
   notificationLedgerModel,
+  defaultOrganizationId,
+  logger,
 }) {
   const router = express.Router();
 
-  router.post('/telegram', async (req, res) => {
+  // This endpoint used to accept every request completely unauthenticated —
+  // no secret-token check, no rate limit — despite creating real user
+  // accounts and driving real ticket creation via the /newticket
+  // conversation below. TELEGRAM_WEBHOOK_SECRET is optional only so
+  // deploying this fix can't itself take the live bot down before the
+  // secret is registered with Telegram's own setWebhook call; once it's
+  // configured, every request is verified. Rate limiting applies either way.
+  const telegramWebhookLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: CONFIG.TELEGRAM_WEBHOOK_RATE_LIMIT_MAX,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  router.post('/telegram', telegramWebhookLimiter, async (req, res) => {
+    if (CONFIG.TELEGRAM_WEBHOOK_SECRET) {
+      const provided = req.header('x-telegram-bot-api-secret-token');
+      if (!hasValidTelegramSecret(provided, CONFIG.TELEGRAM_WEBHOOK_SECRET)) {
+        return res.status(401).json({ ok: false, message: 'Invalid webhook secret' });
+      }
+    } else {
+      logger?.warn('Telegram webhook received with no TELEGRAM_WEBHOOK_SECRET configured — request accepted unauthenticated.');
+    }
+
+    // This route has no user session to derive an organization from (it's
+    // driven by Telegram, not a logged-in browser) — every tenant-scoped
+    // model touched below (User/Ticket/TicketHistory) requires a real
+    // established tenant context or it throws, so the whole handler runs
+    // inside the platform's own default organization, same as other
+    // pre-auth/no-session flows (see writePublicAudit's use of
+    // defaultOrganizationId in routes/auth.js).
+    return runWithOrganization(defaultOrganizationId, () => handleTelegramUpdate(req, res));
+  });
+
+  async function handleTelegramUpdate(req, res) {
     const message = req.body.message || req.body.edited_message;
     if (!message) return res.json({ ok: true });
 
@@ -110,7 +161,7 @@ export default function webhooksRouteFactory({
 
     sendTelegramMessage(chatId, 'Unknown command. Use /newticket to create incident ticket.');
     return res.json({ ok: true });
-  });
+  }
 
   return router;
 }

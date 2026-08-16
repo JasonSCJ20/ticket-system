@@ -1454,6 +1454,8 @@ async function setup() {
     ticketHistoryModel,
     notify,
     notificationLedgerModel,
+    defaultOrganizationId: defaultOrganization.id,
+    logger,
   }));
 
   app.use('/api/automation', automationRouteFactory({
